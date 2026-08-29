@@ -1,8 +1,6 @@
 # cachegate
 
-<!-- "OWNER" below is a placeholder - fill in the real GitHub org/username
-     at step 15, same placeholder used in .github/ISSUE_TEMPLATE/config.yml -->
-[![Tests](https://github.com/OWNER/cachegate/actions/workflows/test.yml/badge.svg)](https://github.com/OWNER/cachegate/actions/workflows/test.yml)
+[![Tests](https://github.com/iDebunk/cachegate/actions/workflows/test.yml/badge.svg)](https://github.com/iDebunk/cachegate/actions/workflows/test.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
 A self-hostable, OpenAI-compatible proxy that routes LLM requests to the

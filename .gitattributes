@@ -1,0 +1,12 @@
+# Force LF regardless of the checking-out platform's git config
+# (core.autocrlf). Real incident this exists to prevent: a Windows
+# checkout of sync-oss-release.sh got CRLF line endings, which broke
+# it immediately with "$'\r': command not found" - no bash interpreter
+# on any platform handles a CRLF shebang/script correctly. See
+# OPEN_SOURCE_ROADMAP.md step 16.
+*.sh text eol=lf
+
+# Everything else: let git decide text vs. binary automatically, but
+# normalize line endings to LF in the repository itself either way -
+# this project has no reason to ever store CRLF.
+* text=auto eol=lf
