@@ -1,0 +1,63 @@
+name: Tests
+
+# Runs on every push and PR - unlike this monorepo's own root
+# .github/workflows/e2e.yml (currently workflow_dispatch-only), this
+# is a public OSS repo once extracted: a green check on every PR IS
+# the trust signal step 8 of OPEN_SOURCE_ROADMAP.md exists for, so
+# automatic triggers are the whole point here, not something to dial
+# back to manual.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # metrics-postgres.test.js needs a REAL reachable Postgres - it
+    # fails loudly (ECONNREFUSED) rather than skipping if one isn't
+    # running, by design (see that file's own header comment). Values
+    # here match its own hardcoded fallback connection string exactly
+    # (MEMOCODE_ROUTER_TEST_DATABASE_URL's default), so no extra env
+    # wiring is needed below.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: dryrun
+          POSTGRES_DB: router_metrics_dryrun
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    strategy:
+      # Multiple Node versions, not just one: package.json declares
+      # "engines": {"node": ">=18.0.0"} - running the suite against all
+      # three actually backs that claim instead of just asserting it.
+      matrix:
+        node-version: ['18.x', '20.x', '22.x']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # semanticCache.test.js spawns its own throwaway redis-server
+      # process directly (a real instance, not a mock) - ubuntu-latest
+      # doesn't ship the binary, so it has to be installed explicitly.
+      # This is NOT the same thing as the Postgres service above: that
+      # test connects to an already-running external service, this one
+      # starts and stops its own process on a random port.
+      - name: Install redis-server
+        run: sudo apt-get update && sudo apt-get install -y redis-server
+
+      - run: npm ci
+      - run: npm test

@@ -1,0 +1,8 @@
+# NOTE (remove before step 15/16 ships): the URL below has a placeholder
+# "OWNER" - fill in the real GitHub org/username once the public repo
+# actually exists.
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/OWNER/cachegate/security/advisories/new
+    about: Do not open a public issue for a vulnerability - use private vulnerability reporting instead. See SECURITY.md.

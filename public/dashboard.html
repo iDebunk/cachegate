@@ -1,0 +1,1119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model Router · Cost Dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface-1: #fcfcfb;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --series-1: #2a78d6; /* exact hit / cost line / provider bar 1 */
+    --series-2: #eb6834; /* semantic hit / provider bar 2 */
+    --series-3: #1baf7a; /* miss */
+    --status-critical: #d03b3b;
+    --status-good: #0ca30c;
+    --hover-wash: rgba(11,11,11,0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface-1: #1a1a19;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --grid: #2c2c2a;
+      --axis: #383835;
+      --border: rgba(255,255,255,0.10);
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --status-critical: #d03b3b;
+      --status-good: #0ca30c;
+      --hover-wash: rgba(255,255,255,0.06);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  body { padding: 24px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .subtitle { color: var(--text-secondary); font-size: 13px; margin: 0 0 20px; }
+
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin: 0 0 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  /* Key gate */
+  #keyGate { display: none; }
+  #keyGate.visible { display: block; }
+  #keyGate input {
+    font: inherit;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--axis);
+    background: var(--page);
+    color: var(--text-primary);
+    width: 320px;
+    max-width: 100%;
+  }
+  #keyGate button, .filter-row button, .view-toggle button, #forgetKey {
+    font: inherit;
+    padding: 7px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--axis);
+    background: var(--surface-1);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  #keyGate button:hover, .filter-row button:hover, .view-toggle button:hover, #forgetKey:hover {
+    background: var(--hover-wash);
+  }
+  #keyError { color: var(--status-critical); font-size: 13px; margin-top: 8px; }
+
+  #dashboard { display: none; }
+  #dashboard.visible { display: block; }
+
+  /* Filter row */
+  .filter-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .filter-row button[aria-pressed="true"] {
+    background: var(--series-1);
+    border-color: var(--series-1);
+    color: #fff;
+  }
+  .filter-row .spacer { flex: 1; }
+  #forgetKey { font-size: 12px; color: var(--text-secondary); }
+
+  .refresh-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .refresh-control label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  #lastUpdated { color: var(--text-muted); }
+
+  /* KPI row */
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .stat-tile {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .stat-tile .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .stat-tile .value { font-size: 24px; font-weight: 600; font-variant-numeric: proportional-nums; }
+  .stat-tile .value.critical { color: var(--status-critical); }
+  .stat-tile svg.spark { display: block; margin-top: 6px; }
+
+  /* Provider alerts table - the whole CARD stays out of the DOM (via
+     [hidden] on #providerAlertsCard) whenever no provider currently has
+     a classified error, so a healthy deployment shows nothing here at
+     all rather than an always-visible table that's usually empty. */
+  .data-table td.alert-mark { color: var(--status-critical); font-weight: 700; text-align: center; }
+
+  /* Charts */
+  .chart-wrap { position: relative; }
+  svg.chart { display: block; width: 100%; height: auto; overflow: visible; }
+  .axis-label { fill: var(--text-muted); font-size: 11px; }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .axis-line { stroke: var(--axis); stroke-width: 1; }
+  .direct-label { fill: var(--text-primary); font-size: 12px; font-weight: 600; }
+
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.08s;
+    z-index: 10;
+  }
+  .tooltip.visible { opacity: 1; }
+  .tooltip .t-title { color: var(--text-secondary); margin-bottom: 4px; }
+  .tooltip .t-row { display: flex; align-items: center; gap: 6px; }
+  .tooltip .t-row + .t-row { margin-top: 2px; }
+  .tooltip .t-key { width: 10px; height: 2px; display: inline-block; }
+  .tooltip .t-value { font-weight: 600; }
+  .tooltip .t-note { color: var(--text-muted); margin-top: 4px; }
+
+  .view-toggle { text-align: right; }
+  .view-toggle button { font-size: 12px; padding: 4px 10px; }
+
+  table.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  table.data-table th, table.data-table td {
+    text-align: left;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--grid);
+  }
+  table.data-table th { color: var(--text-secondary); font-weight: 600; }
+  table.data-table td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  table.data-table th.num { text-align: right; }
+
+  .loading { opacity: 0.5; transition: opacity 0.15s; }
+  .empty-note { color: var(--text-muted); font-size: 13px; padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>Model Router · Cost Dashboard</h1>
+<p class="subtitle">Reads GET /dashboard/data. Nothing here is cached in the browser except your internal key.</p>
+
+<div id="keyGate">
+  <div class="card">
+    <h2>Internal key required</h2>
+    <p style="color: var(--text-secondary); font-size: 13px; margin-top: 0;">
+      Paste your MODEL_ROUTER_INTERNAL_KEY. It's stored only in this browser's
+      localStorage, used only for requests to this same origin.
+    </p>
+    <input type="password" id="keyInput" placeholder="MODEL_ROUTER_INTERNAL_KEY" autocomplete="off">
+    <button id="keySubmit">Connect</button>
+    <div id="keyError"></div>
+  </div>
+</div>
+
+<div id="dashboard">
+  <div class="filter-row" role="group" aria-label="Date range">
+    <button data-days="7">Last 7 days</button>
+    <button data-days="14" aria-pressed="true">Last 14 days</button>
+    <button data-days="30">Last 30 days</button>
+    <span class="spacer"></span>
+    <span class="refresh-control">
+      <span id="lastUpdated"></span>
+      <label><input type="checkbox" id="autoRefreshToggle"> Auto-refresh</label>
+    </span>
+    <button id="forgetKey">Forget key</button>
+  </div>
+
+  <div class="kpi-row" id="kpiRow"></div>
+
+  <div class="card">
+    <h2>
+      <span>Cost over time</span>
+      <span class="view-toggle"><button data-toggle="costChart">View as table</button></span>
+    </h2>
+    <div class="chart-wrap" id="costChart"></div>
+  </div>
+
+  <div class="card">
+    <h2>
+      <span>Requests by outcome</span>
+      <span class="view-toggle"><button data-toggle="outcomeChart">View as table</button></span>
+    </h2>
+    <div class="legend" id="outcomeLegend"></div>
+    <div class="chart-wrap" id="outcomeChart" style="margin-top: 10px;"></div>
+  </div>
+
+  <div class="card">
+    <h2>
+      <span>Cost by provider</span>
+      <span class="view-toggle"><button data-toggle="providerChart">View as table</button></span>
+    </h2>
+    <div class="chart-wrap" id="providerChart"></div>
+  </div>
+
+  <div class="card">
+    <h2>Provider health</h2>
+    <div id="providerTable"></div>
+  </div>
+
+  <div class="card" id="providerAlertsCard" hidden>
+    <h2>Provider alerts</h2>
+    <div id="providerAlertsTable"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var STORAGE_KEY = 'modelRouterDashboardKey';
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  var currentDays = 14;
+  var lastData = null;
+  var viewMode = {}; // chartId -> 'chart' | 'table'
+
+  // ---------- formatting ----------
+
+  function formatUsd(n) {
+    if (n === null || n === undefined) return '—';
+    var abs = Math.abs(n);
+    if (abs === 0) return '$0.00';
+    if (abs < 0.01) return '$' + n.toFixed(4);
+    if (abs < 1000) return '$' + n.toFixed(2);
+    if (abs < 1000000) return '$' + (n / 1000).toFixed(1) + 'K';
+    return '$' + (n / 1000000).toFixed(1) + 'M';
+  }
+
+  function formatCount(n) {
+    if (n === null || n === undefined) return '—';
+    var abs = Math.abs(n);
+    if (abs < 1000) return String(n);
+    if (abs < 1000000) return (n / 1000).toFixed(1) + 'K';
+    return (n / 1000000).toFixed(1) + 'M';
+  }
+
+  function formatPercent(x) {
+    if (x === null || x === undefined) return '—';
+    return (x * 100).toFixed(1) + '%';
+  }
+
+  function formatMs(ms) {
+    if (ms === null || ms === undefined) return '—';
+    if (ms < 1000) return Math.round(ms) + ' ms';
+    return (ms / 1000).toFixed(2) + ' s';
+  }
+
+  function formatDateLabel(dateStr) {
+    // dateStr is 'YYYY-MM-DD'
+    var parts = dateStr.split('-');
+    var d = new Date(Date.UTC(+parts[0], +parts[1] - 1, +parts[2]));
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  }
+
+  // Classic "nice numbers" axis algorithm - y-axis ticks should land on
+  // clean values (0.10, 0.25, 0.50 / 0, 10, 20), never on whatever
+  // fraction of the raw max a fixed step count happens to produce.
+  function niceNumber(range, round) {
+    if (range <= 0) return 1;
+    var exponent = Math.floor(Math.log(range) / Math.LN10);
+    var fraction = range / Math.pow(10, exponent);
+    var niceFraction;
+    if (round) {
+      if (fraction < 1.5) niceFraction = 1;
+      else if (fraction < 3) niceFraction = 2;
+      else if (fraction < 7) niceFraction = 5;
+      else niceFraction = 10;
+    } else {
+      if (fraction <= 1) niceFraction = 1;
+      else if (fraction <= 2) niceFraction = 2;
+      else if (fraction <= 5) niceFraction = 5;
+      else niceFraction = 10;
+    }
+    return niceFraction * Math.pow(10, exponent);
+  }
+
+  function niceAxisTicks(maxValue, tickCount) {
+    tickCount = tickCount || 4;
+    if (!(maxValue > 0)) return { max: 1, ticks: [0, 0.25, 0.5, 0.75, 1] };
+    var niceRange = niceNumber(maxValue, false);
+    var step = niceNumber(niceRange / tickCount, true);
+    var niceMax = Math.ceil(maxValue / step) * step;
+    var ticks = [];
+    for (var v = 0; v <= niceMax + step / 2; v += step) ticks.push(v);
+    return { max: niceMax, ticks: ticks };
+  }
+
+  // ---------- key gate ----------
+
+  function getStoredKey() {
+    try { return localStorage.getItem(STORAGE_KEY); } catch (e) { return null; }
+  }
+  function setStoredKey(key) {
+    try { localStorage.setItem(STORAGE_KEY, key); } catch (e) { /* private mode etc - key just won't persist */ }
+  }
+  function clearStoredKey() {
+    try { localStorage.removeItem(STORAGE_KEY); } catch (e) { /* ignore */ }
+  }
+
+  function showKeyGate(errorText) {
+    document.getElementById('keyGate').classList.add('visible');
+    document.getElementById('dashboard').classList.remove('visible');
+    document.getElementById('keyError').textContent = errorText || '';
+  }
+  function showDashboard() {
+    document.getElementById('keyGate').classList.remove('visible');
+    document.getElementById('dashboard').classList.add('visible');
+  }
+
+  document.getElementById('keySubmit').addEventListener('click', function () {
+    var val = document.getElementById('keyInput').value.trim();
+    if (!val) return;
+    setStoredKey(val);
+    loadDashboard(currentDays);
+  });
+  document.getElementById('keyInput').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') document.getElementById('keySubmit').click();
+  });
+  document.getElementById('forgetKey').addEventListener('click', function () {
+    clearStoredKey();
+    showKeyGate('');
+  });
+
+  // ---------- data loading ----------
+
+  var lastUpdatedAt = null;
+
+  function loadDashboard(days) {
+    currentDays = days;
+    var key = getStoredKey();
+    if (!key) { showKeyGate(''); return; }
+
+    var dashboardEl = document.getElementById('dashboard');
+    if (lastData) dashboardEl.classList.add('loading'); // hold previous render, no skeleton flash
+
+    fetch('/dashboard/data?days=' + encodeURIComponent(days), {
+      headers: { Authorization: 'Bearer ' + key }
+    }).then(function (res) {
+      if (res.status === 401) {
+        clearStoredKey();
+        showKeyGate('That key was rejected. Please re-enter it.');
+        throw new Error('unauthorized');
+      }
+      if (!res.ok) throw new Error('request failed: ' + res.status);
+      return res.json();
+    }).then(function (data) {
+      lastData = data;
+      lastUpdatedAt = Date.now();
+      showDashboard();
+      dashboardEl.classList.remove('loading');
+      render(data);
+      updateLastUpdatedText();
+    }).catch(function (err) {
+      dashboardEl.classList.remove('loading');
+      if (err.message !== 'unauthorized') console.warn('Dashboard load failed:', err.message);
+    });
+  }
+
+  document.querySelectorAll('.filter-row button[data-days]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.filter-row button[data-days]').forEach(function (b) {
+        b.setAttribute('aria-pressed', String(b === btn));
+      });
+      loadDashboard(Number(btn.dataset.days));
+    });
+  });
+
+  // ---------- auto-refresh ----------
+  //
+  // Without this, a long-open tab shows numbers as of whenever it was
+  // last loaded (or a range button last clicked) with no indication
+  // they've gone stale - the only previous workaround was re-clicking
+  // the current range manually. Default ON, toggleable, and paused
+  // while the tab isn't visible (no point polling a backend nobody's
+  // looking at). The interval length is overridable via a global for
+  // fast, real automated testing - never meant to be set in production.
+
+  var REFRESH_INTERVAL_MS = window.__DASHBOARD_REFRESH_MS_OVERRIDE__ || 30000;
+  var AUTO_REFRESH_STORAGE_KEY = 'modelRouterDashboardAutoRefresh';
+  var refreshIntervalId = null;
+
+  function isAutoRefreshEnabled() {
+    try {
+      var stored = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
+      return stored === null ? true : stored === 'true'; // default ON
+    } catch (e) {
+      return true;
+    }
+  }
+
+  function setAutoRefreshEnabled(enabled) {
+    try { localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, String(enabled)); } catch (e) { /* ignore */ }
+  }
+
+  function startAutoRefresh() {
+    stopAutoRefresh();
+    refreshIntervalId = setInterval(function () {
+      if (document.hidden) return; // don't poll a backend nobody's looking at
+      loadDashboard(currentDays);
+    }, REFRESH_INTERVAL_MS);
+  }
+
+  function stopAutoRefresh() {
+    if (refreshIntervalId) {
+      clearInterval(refreshIntervalId);
+      refreshIntervalId = null;
+    }
+  }
+
+  function updateLastUpdatedText() {
+    var el = document.getElementById('lastUpdated');
+    if (!lastUpdatedAt) { el.textContent = ''; return; }
+    var seconds = Math.round((Date.now() - lastUpdatedAt) / 1000);
+    var text;
+    if (seconds < 5) text = 'Updated just now';
+    else if (seconds < 60) text = 'Updated ' + seconds + 's ago';
+    else text = 'Updated ' + Math.round(seconds / 60) + 'm ago';
+    el.textContent = text;
+  }
+  setInterval(updateLastUpdatedText, 1000);
+
+  var autoRefreshToggle = document.getElementById('autoRefreshToggle');
+  autoRefreshToggle.checked = isAutoRefreshEnabled();
+  if (autoRefreshToggle.checked) startAutoRefresh();
+
+  autoRefreshToggle.addEventListener('change', function () {
+    setAutoRefreshEnabled(autoRefreshToggle.checked);
+    if (autoRefreshToggle.checked) {
+      loadDashboard(currentDays); // refresh immediately on re-enable, don't wait a full interval
+      startAutoRefresh();
+    } else {
+      stopAutoRefresh();
+    }
+  });
+
+  // Coming back to a backgrounded tab is a natural moment to refresh,
+  // independent of the interval timer (which was skipping ticks while
+  // hidden anyway).
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && isAutoRefreshEnabled() && lastUpdatedAt) {
+      loadDashboard(currentDays);
+    }
+  });
+
+  document.querySelectorAll('.view-toggle button[data-toggle]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.dataset.toggle;
+      viewMode[id] = viewMode[id] === 'table' ? 'chart' : 'table';
+      btn.textContent = viewMode[id] === 'table' ? 'View as chart' : 'View as table';
+      if (lastData) render(lastData);
+    });
+  });
+
+  // ---------- rendering ----------
+
+  function render(data) {
+    renderKpis(data);
+    renderCostChart(data);
+    renderOutcomeChart(data);
+    renderProviderChart(data);
+    renderProviderTable(data);
+    renderProviderAlertsTable(data);
+  }
+
+  // ---- Provider alerts table - one row per provider currently in
+  // trouble, one column per known failure reason (a checkmark in
+  // whichever column matches). The whole CARD is [hidden] when nothing's
+  // wrong - a healthy deployment shows nothing here at all instead of an
+  // always-visible table that's usually empty.
+  //
+  // "Currently" here matches provider_alerts's own source (server.js's
+  // /dashboard/data: metrics.providerStats(), a ROLLING window of recent
+  // requests, the same one router.js itself uses to decide routing
+  // health) - not this page's own calendar day-range picker. A provider
+  // that was broken 10 days ago but has been fine since won't show up
+  // here just because "Last 30 days" is selected; that's what the
+  // "Provider health" table right above this one is for.
+  var ALERT_COLUMNS = [
+    { key: 'authentication_error', label: 'Authentication' },
+    { key: 'insufficient_quota', label: 'Insufficient quota' },
+    { key: 'rate_limit_error', label: 'Rate limit' }
+  ];
+
+  function renderProviderAlertsTable(data) {
+    var card = document.getElementById('providerAlertsCard');
+    var container = document.getElementById('providerAlertsTable');
+    container.innerHTML = '';
+    var alerts = data.provider_alerts || [];
+    if (!alerts.length) {
+      card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+
+    var headers = ['Provider'].concat(ALERT_COLUMNS.map(function (c) { return c.label; }), ['Other']);
+    var rows = alerts.map(function (a) {
+      var row = [a.provider];
+      var matchedKnownColumn = false;
+      ALERT_COLUMNS.forEach(function (c) {
+        if (a.error_type === c.key) {
+          row.push('✓');
+          matchedKnownColumn = true;
+        } else {
+          row.push('');
+        }
+      });
+      // Whatever the provider itself called it, if it's not one of the
+      // three known buckets above - still shown, not silently dropped,
+      // same "unknown is more honest than guessing" reasoning as
+      // classifyErrorType() itself.
+      row.push(matchedKnownColumn ? '' : '✓ (' + a.error_type.replace(/_/g, ' ') + ')');
+      return row;
+    });
+
+    var table = buildTable(headers, rows, headers.map(function (_, i) { return i > 0; }));
+    // Mark every checkmark cell so it reads as a clear signal, not just
+    // more plain table text - matches the KPI tiles' own .critical
+    // treatment for "this number means trouble" elsewhere on this page.
+    Array.prototype.forEach.call(table.querySelectorAll('td.num'), function (td) {
+      if (td.textContent.indexOf('✓') !== -1) td.classList.add('alert-mark');
+    });
+    container.appendChild(table);
+  }
+
+  function renderKpis(data) {
+    var tiles = [
+      { label: 'Total cost (' + data.days + 'd)', value: formatUsd(data.total_cost_usd), spark: data.daily.map(function (d) { return d.cost_usd; }) },
+      { label: 'Total requests', value: formatCount(data.sample_size) },
+      { label: 'Exact hit rate', value: formatPercent(data.cache_hit_rate.exact) },
+      { label: 'Semantic hit rate', value: formatPercent(data.cache_hit_rate.semantic) },
+      { label: 'Combined hit rate', value: formatPercent(data.cache_hit_rate.combined) },
+      { label: 'Error rate', value: formatPercent(data.error_rate), critical: data.error_rate > 0.05 }
+    ];
+    var row = document.getElementById('kpiRow');
+    row.innerHTML = '';
+    tiles.forEach(function (t) {
+      var tile = document.createElement('div');
+      tile.className = 'stat-tile';
+      var label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = t.label;
+      var value = document.createElement('div');
+      value.className = 'value' + (t.critical ? ' critical' : '');
+      value.textContent = t.value;
+      tile.appendChild(label);
+      tile.appendChild(value);
+      if (t.spark && t.spark.length > 1) {
+        tile.appendChild(sparkline(t.spark));
+      }
+      row.appendChild(tile);
+    });
+  }
+
+  function sparkline(values) {
+    var w = 140, h = 28;
+    var max = Math.max.apply(null, values.concat([0.0001]));
+    var min = Math.min.apply(null, values.concat([0]));
+    var range = (max - min) || 1;
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'spark');
+    svg.setAttribute('width', w);
+    svg.setAttribute('height', h);
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    var step = values.length > 1 ? w / (values.length - 1) : 0;
+    var points = values.map(function (v, i) {
+      var x = i * step;
+      var y = h - 4 - ((v - min) / range) * (h - 8);
+      return [x, y];
+    });
+    var path = document.createElementNS(SVG_NS, 'path');
+    var d = points.map(function (p, i) { return (i === 0 ? 'M' : 'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' ');
+    path.setAttribute('d', d);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', 'var(--series-1)');
+    path.setAttribute('stroke-width', '2');
+    path.setAttribute('stroke-linejoin', 'round');
+    path.setAttribute('stroke-linecap', 'round');
+    svg.appendChild(path);
+    var last = points[points.length - 1];
+    var dot = document.createElementNS(SVG_NS, 'circle');
+    dot.setAttribute('cx', last[0]);
+    dot.setAttribute('cy', last[1]);
+    dot.setAttribute('r', 3);
+    dot.setAttribute('fill', 'var(--series-1)');
+    svg.appendChild(dot);
+    return svg;
+  }
+
+  function ensureTooltip(container) {
+    var tip = container.querySelector('.tooltip');
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.className = 'tooltip';
+      container.appendChild(tip);
+    }
+    return tip;
+  }
+
+  function positionTooltip(tip, container, x, y) {
+    var rect = container.getBoundingClientRect();
+    var tipWidth = tip.offsetWidth || 140;
+    var left = Math.min(Math.max(x + 12, 4), rect.width - tipWidth - 4);
+    tip.style.left = left + 'px';
+    tip.style.top = Math.max(y - 12, 4) + 'px';
+  }
+
+  function setTooltipRows(tip, title, rows, note) {
+    tip.textContent = '';
+    var titleEl = document.createElement('div');
+    titleEl.className = 't-title';
+    titleEl.textContent = title;
+    tip.appendChild(titleEl);
+    rows.forEach(function (r) {
+      var rowEl = document.createElement('div');
+      rowEl.className = 't-row';
+      var key = document.createElement('span');
+      key.className = 't-key';
+      key.style.background = r.color;
+      var label = document.createElement('span');
+      label.textContent = r.label + ':';
+      var value = document.createElement('span');
+      value.className = 't-value';
+      value.textContent = r.value;
+      rowEl.appendChild(key);
+      rowEl.appendChild(label);
+      rowEl.appendChild(value);
+      tip.appendChild(rowEl);
+    });
+    if (note) {
+      var noteEl = document.createElement('div');
+      noteEl.className = 't-note';
+      noteEl.textContent = note;
+      tip.appendChild(noteEl);
+    }
+  }
+
+  // ---- Cost over time: single-series line chart ----
+
+  function renderCostChart(data) {
+    var container = document.getElementById('costChart');
+    container.innerHTML = '';
+
+    if (!data.daily.length) {
+      container.innerHTML = '<div class="empty-note">No requests recorded in this range yet.</div>';
+      return;
+    }
+
+    if (viewMode.costChart === 'table') {
+      container.appendChild(buildTable(
+        ['Date', 'Cost'],
+        data.daily.map(function (d) { return [formatDateLabel(d.date), formatUsd(d.cost_usd)]; }),
+        [false, true]
+      ));
+      return;
+    }
+
+    var w = 760, h = 220, padL = 46, padR = 16, padT = 16, padB = 28;
+    var plotW = w - padL - padR, plotH = h - padT - padB;
+    var values = data.daily.map(function (d) { return d.cost_usd; });
+    var rawMax = Math.max.apply(null, values.concat([0.0001]));
+    var axis = niceAxisTicks(rawMax);
+    var maxV = axis.max;
+
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'chart');
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+
+    // gridlines + y-axis labels, at clean ("nice") values, not at
+    // whatever fraction of the raw max a fixed step count produces.
+    axis.ticks.forEach(function (tickValue) {
+      var gy = padT + plotH - (tickValue / maxV) * plotH;
+      var line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('class', 'gridline');
+      line.setAttribute('x1', padL); line.setAttribute('x2', w - padR);
+      line.setAttribute('y1', gy); line.setAttribute('y2', gy);
+      svg.appendChild(line);
+      var label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('class', 'axis-label');
+      label.setAttribute('x', padL - 8);
+      label.setAttribute('y', gy + 4);
+      label.setAttribute('text-anchor', 'end');
+      label.textContent = formatUsd(tickValue);
+      svg.appendChild(label);
+    });
+
+    var stepX = data.daily.length > 1 ? plotW / (data.daily.length - 1) : 0;
+    var points = data.daily.map(function (d, i) {
+      var x = padL + i * stepX;
+      var y = padT + plotH - (d.cost_usd / maxV) * plotH;
+      return { x: x, y: y, d: d };
+    });
+
+    // x-axis date labels: first, middle, last only (avoid crowding)
+    [0, Math.floor((points.length - 1) / 2), points.length - 1].forEach(function (i, idx, arr) {
+      if (idx > 0 && arr[idx] === arr[idx - 1]) return;
+      var label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('class', 'axis-label');
+      label.setAttribute('x', points[i].x);
+      label.setAttribute('y', h - 6);
+      label.setAttribute('text-anchor', idx === 0 ? 'start' : (idx === arr.length - 1 ? 'end' : 'middle'));
+      label.textContent = formatDateLabel(points[i].d.date);
+      svg.appendChild(label);
+    });
+
+    var path = document.createElementNS(SVG_NS, 'path');
+    var dAttr = points.map(function (p, i) { return (i === 0 ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1); }).join(' ');
+    path.setAttribute('d', dAttr);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', 'var(--series-1)');
+    path.setAttribute('stroke-width', '2');
+    path.setAttribute('stroke-linejoin', 'round');
+    path.setAttribute('stroke-linecap', 'round');
+    svg.appendChild(path);
+
+    // end-dot + direct label on the last point
+    var lastP = points[points.length - 1];
+    var endDot = document.createElementNS(SVG_NS, 'circle');
+    endDot.setAttribute('cx', lastP.x); endDot.setAttribute('cy', lastP.y);
+    endDot.setAttribute('r', 4);
+    endDot.setAttribute('fill', 'var(--series-1)');
+    endDot.setAttribute('stroke', 'var(--surface-1)');
+    endDot.setAttribute('stroke-width', '2');
+    svg.appendChild(endDot);
+    var endLabel = document.createElementNS(SVG_NS, 'text');
+    endLabel.setAttribute('class', 'direct-label');
+    endLabel.setAttribute('x', Math.min(lastP.x + 8, w - padR - 40));
+    endLabel.setAttribute('y', lastP.y - 8);
+    endLabel.textContent = formatUsd(lastP.d.cost_usd);
+    svg.appendChild(endLabel);
+
+    // crosshair
+    var crosshair = document.createElementNS(SVG_NS, 'line');
+    crosshair.setAttribute('class', 'axis-line');
+    crosshair.setAttribute('y1', padT); crosshair.setAttribute('y2', padT + plotH);
+    crosshair.setAttribute('stroke-dasharray', 'none');
+    crosshair.style.opacity = '0';
+    svg.appendChild(crosshair);
+
+    var hitLayer = document.createElementNS(SVG_NS, 'rect');
+    hitLayer.setAttribute('x', padL); hitLayer.setAttribute('y', padT);
+    hitLayer.setAttribute('width', plotW); hitLayer.setAttribute('height', plotH);
+    hitLayer.setAttribute('fill', 'transparent');
+    svg.appendChild(hitLayer);
+
+    container.appendChild(svg);
+    var tip = ensureTooltip(container);
+
+    function handleMove(clientX, clientY) {
+      var svgRect = svg.getBoundingClientRect();
+      var scaleX = w / svgRect.width;
+      var localX = (clientX - svgRect.left) * scaleX;
+      var idx = Math.round((localX - padL) / (stepX || 1));
+      idx = Math.max(0, Math.min(points.length - 1, idx));
+      var p = points[idx];
+      crosshair.setAttribute('x1', p.x); crosshair.setAttribute('x2', p.x);
+      crosshair.style.opacity = '1';
+      setTooltipRows(tip, formatDateLabel(p.d.date), [
+        { color: 'var(--series-1)', label: 'Cost', value: formatUsd(p.d.cost_usd) }
+      ]);
+      tip.classList.add('visible');
+      var localY = (clientY - svgRect.top) * (h / svgRect.height);
+      positionTooltip(tip, container, (p.x / w) * svgRect.width, (p.y / h) * svgRect.height);
+    }
+    hitLayer.addEventListener('pointermove', function (e) { handleMove(e.clientX, e.clientY); });
+    hitLayer.addEventListener('pointerleave', function () {
+      crosshair.style.opacity = '0';
+      tip.classList.remove('visible');
+    });
+  }
+
+  // ---- Requests by outcome: stacked bar chart ----
+
+  function renderOutcomeChart(data) {
+    var container = document.getElementById('outcomeChart');
+    var legend = document.getElementById('outcomeLegend');
+    container.innerHTML = '';
+
+    var series = [
+      { key: 'exact_hits', label: 'Exact hit', color: 'var(--series-1)' },
+      { key: 'semantic_hits', label: 'Semantic hit', color: 'var(--series-2)' },
+      { key: 'misses', label: 'Miss (dispatched)', color: 'var(--series-3)' }
+    ];
+
+    legend.innerHTML = '';
+    series.forEach(function (s) {
+      var item = document.createElement('span');
+      item.className = 'item';
+      var sw = document.createElement('span');
+      sw.className = 'swatch';
+      sw.style.background = s.color;
+      var label = document.createElement('span');
+      label.textContent = s.label;
+      item.appendChild(sw); item.appendChild(label);
+      legend.appendChild(item);
+    });
+
+    if (!data.daily.length) {
+      container.innerHTML = '<div class="empty-note">No requests recorded in this range yet.</div>';
+      return;
+    }
+
+    if (viewMode.outcomeChart === 'table') {
+      container.appendChild(buildTable(
+        ['Date', 'Exact hit', 'Semantic hit', 'Miss', 'Errors', 'Total'],
+        data.daily.map(function (d) {
+          return [formatDateLabel(d.date), formatCount(d.exact_hits), formatCount(d.semantic_hits), formatCount(d.misses), formatCount(d.errors), formatCount(d.requests)];
+        }),
+        [false, true, true, true, true, true]
+      ));
+      return;
+    }
+
+    var w = 760, h = 220, padL = 40, padR = 16, padT = 16, padB = 28;
+    var plotW = w - padL - padR, plotH = h - padT - padB;
+    var rawMaxTotal = Math.max.apply(null, data.daily.map(function (d) { return d.requests; }).concat([1]));
+    var axis = niceAxisTicks(rawMaxTotal);
+    var maxTotal = axis.max;
+
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'chart');
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+
+    axis.ticks.forEach(function (tickValue) {
+      var gy = padT + plotH - (tickValue / maxTotal) * plotH;
+      var line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('class', 'gridline');
+      line.setAttribute('x1', padL); line.setAttribute('x2', w - padR);
+      line.setAttribute('y1', gy); line.setAttribute('y2', gy);
+      svg.appendChild(line);
+      var label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('class', 'axis-label');
+      label.setAttribute('x', padL - 6);
+      label.setAttribute('y', gy + 4);
+      label.setAttribute('text-anchor', 'end');
+      label.textContent = formatCount(Math.round(tickValue));
+      svg.appendChild(label);
+    });
+
+    var n = data.daily.length;
+    var slotW = plotW / n;
+    var barW = Math.min(24, slotW * 0.6);
+    var gap = 2;
+
+    container.appendChild(svg);
+    var tip = ensureTooltip(container);
+
+    data.daily.forEach(function (d, i) {
+      var slotX = padL + i * slotW + (slotW - barW) / 2;
+      var yCursor = padT + plotH;
+      var segs = [
+        { value: d.exact_hits, color: 'var(--series-1)' },
+        { value: d.semantic_hits, color: 'var(--series-2)' },
+        { value: d.misses, color: 'var(--series-3)' }
+      ];
+      var group = document.createElementNS(SVG_NS, 'g');
+      segs.forEach(function (seg) {
+        if (seg.value <= 0) return;
+        var segH = (seg.value / maxTotal) * plotH;
+        var rect = document.createElementNS(SVG_NS, 'rect');
+        rect.setAttribute('x', slotX);
+        rect.setAttribute('y', yCursor - segH);
+        rect.setAttribute('width', barW);
+        rect.setAttribute('height', Math.max(segH - gap, 0));
+        rect.setAttribute('rx', 2);
+        rect.setAttribute('fill', seg.color);
+        group.appendChild(rect);
+        yCursor -= segH;
+      });
+
+      var hitRect = document.createElementNS(SVG_NS, 'rect');
+      hitRect.setAttribute('x', padL + i * slotW);
+      hitRect.setAttribute('y', padT);
+      hitRect.setAttribute('width', slotW);
+      hitRect.setAttribute('height', plotH);
+      hitRect.setAttribute('fill', 'transparent');
+      hitRect.addEventListener('pointermove', function (e) {
+        var svgRect = svg.getBoundingClientRect();
+        var rows = [
+          { color: 'var(--series-1)', label: 'Exact hit', value: formatCount(d.exact_hits) },
+          { color: 'var(--series-2)', label: 'Semantic hit', value: formatCount(d.semantic_hits) },
+          { color: 'var(--series-3)', label: 'Miss', value: formatCount(d.misses) }
+        ];
+        var note = d.errors > 0 ? (d.errors + ' of the misses errored') : null;
+        setTooltipRows(tip, formatDateLabel(d.date) + ' · ' + formatCount(d.requests) + ' requests', rows, note);
+        tip.classList.add('visible');
+        positionTooltip(tip, container, (e.clientX - svgRect.left), (e.clientY - svgRect.top));
+      });
+      hitRect.addEventListener('pointerleave', function () { tip.classList.remove('visible'); });
+      group.appendChild(hitRect);
+
+      if (i === 0 || i === n - 1 || i === Math.floor((n - 1) / 2)) {
+        var label = document.createElementNS(SVG_NS, 'text');
+        label.setAttribute('class', 'axis-label');
+        label.setAttribute('x', padL + i * slotW + slotW / 2);
+        label.setAttribute('y', h - 6);
+        label.setAttribute('text-anchor', 'middle');
+        label.textContent = formatDateLabel(d.date);
+        svg.appendChild(label);
+      }
+
+      svg.appendChild(group);
+    });
+  }
+
+  // ---- Cost by provider: simple bar chart ----
+
+  function renderProviderChart(data) {
+    var container = document.getElementById('providerChart');
+    container.innerHTML = '';
+
+    var names = Object.keys(data.by_provider).sort();
+    if (!names.length) {
+      container.innerHTML = '<div class="empty-note">No provider activity in this range yet.</div>';
+      return;
+    }
+
+    if (viewMode.providerChart === 'table') {
+      container.appendChild(buildTable(
+        ['Provider', 'Cost'],
+        names.map(function (name) { return [name, formatUsd(data.by_provider[name].cost_usd)]; }),
+        [false, true]
+      ));
+      return;
+    }
+
+    var colors = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)'];
+    var w = 760, h = 160, padL = 90, padR = 60, padT = 10, padB = 10;
+    var plotW = w - padL - padR, plotH = h - padT - padB;
+    var maxCost = Math.max.apply(null, names.map(function (n) { return data.by_provider[n].cost_usd; }).concat([0.0001]));
+    var barH = 22, gap = (plotH - names.length * barH) / Math.max(names.length - 1, 1);
+
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'chart');
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + Math.max(h, names.length * (barH + 10)));
+
+    container.appendChild(svg);
+    var tip = ensureTooltip(container);
+
+    names.forEach(function (name, i) {
+      var cost = data.by_provider[name].cost_usd;
+      var y = padT + i * (barH + 10);
+      var barLen = (cost / maxCost) * plotW;
+      var color = colors[i % colors.length];
+
+      var label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('class', 'axis-label');
+      label.setAttribute('x', padL - 8);
+      label.setAttribute('y', y + barH / 2 + 4);
+      label.setAttribute('text-anchor', 'end');
+      label.textContent = name;
+      svg.appendChild(label);
+
+      var rect = document.createElementNS(SVG_NS, 'rect');
+      rect.setAttribute('x', padL);
+      rect.setAttribute('y', y);
+      rect.setAttribute('width', Math.max(barLen, 2));
+      rect.setAttribute('height', barH);
+      rect.setAttribute('rx', 4);
+      rect.setAttribute('fill', color);
+      svg.appendChild(rect);
+
+      var valueLabel = document.createElementNS(SVG_NS, 'text');
+      valueLabel.setAttribute('class', 'direct-label');
+      valueLabel.setAttribute('x', padL + barLen + 8);
+      valueLabel.setAttribute('y', y + barH / 2 + 4);
+      valueLabel.textContent = formatUsd(cost);
+      svg.appendChild(valueLabel);
+
+      var hitRect = document.createElementNS(SVG_NS, 'rect');
+      hitRect.setAttribute('x', padL);
+      hitRect.setAttribute('y', y);
+      hitRect.setAttribute('width', plotW);
+      hitRect.setAttribute('height', barH);
+      hitRect.setAttribute('fill', 'transparent');
+      hitRect.addEventListener('pointermove', function (e) {
+        var svgRect = svg.getBoundingClientRect();
+        setTooltipRows(tip, name, [
+          { color: color, label: 'Cost', value: formatUsd(cost) },
+          { color: color, label: 'Requests', value: formatCount(data.by_provider[name].requests) }
+        ]);
+        tip.classList.add('visible');
+        positionTooltip(tip, container, (e.clientX - svgRect.left), (e.clientY - svgRect.top));
+      });
+      hitRect.addEventListener('pointerleave', function () { tip.classList.remove('visible'); });
+      svg.appendChild(hitRect);
+    });
+  }
+
+  // ---- Provider health table ----
+
+  function renderProviderTable(data) {
+    var container = document.getElementById('providerTable');
+    container.innerHTML = '';
+    var names = Object.keys(data.by_provider).sort();
+    if (!names.length) {
+      container.innerHTML = '<div class="empty-note">No provider activity in this range yet.</div>';
+      return;
+    }
+    container.appendChild(buildTable(
+      ['Provider', 'Requests', 'Cost', 'Error rate', 'Avg latency'],
+      names.map(function (name) {
+        var p = data.by_provider[name];
+        return [name, formatCount(p.requests), formatUsd(p.cost_usd), formatPercent(p.errorRate), formatMs(p.avgLatencyMs)];
+      }),
+      [false, true, true, true, true]
+    ));
+  }
+
+  // ---- shared table builder (the accessible twin of every chart) ----
+
+  function buildTable(headers, rows, numericCols) {
+    var table = document.createElement('table');
+    table.className = 'data-table';
+    var thead = document.createElement('thead');
+    var headRow = document.createElement('tr');
+    headers.forEach(function (hLabel, i) {
+      var th = document.createElement('th');
+      if (numericCols && numericCols[i]) th.className = 'num';
+      th.textContent = hLabel;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    var tbody = document.createElement('tbody');
+    rows.forEach(function (row) {
+      var tr = document.createElement('tr');
+      row.forEach(function (cell, i) {
+        var td = document.createElement('td');
+        if (numericCols && numericCols[i]) td.className = 'num';
+        td.textContent = cell;
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  // ---------- boot ----------
+
+  if (getStoredKey()) {
+    loadDashboard(currentDays);
+  } else {
+    showKeyGate('');
+  }
+})();
+</script>
+
+</body>
+</html>
