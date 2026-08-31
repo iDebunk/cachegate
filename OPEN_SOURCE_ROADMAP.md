@@ -590,6 +590,18 @@ become a second undocumented list.
   `{ app, isAuthConfigured }` - proves it installs and loads correctly
   from the real registry, not just "works in the folder it was built
   in."
+- **Follow-up gap, caught by DeepSeek's read-only review and fixed
+  2026-08-29**: `sync-oss-release.sh --version X.Y.Z` bumps THIS
+  directory's own `package.json` (the monorepo source) in place before
+  copying, by design (see the script's own header comment) - but that
+  bump, from the original `1.0.0` publish, was never committed back
+  here. The monorepo's committed `package.json` sat at the stale
+  `0.1.0` while npm had `1.0.0` live, and the CEO's local
+  `memocode-fresh` checkout carried the real bump only as an
+  uncommitted working-tree change. Fixed by committing `package.json`
+  (and regenerating `package-lock.json` to match) at `1.0.0` here, so
+  the source of truth matches what's actually published instead of
+  lagging behind it silently.
 
 ### 18. ✅ Publish the Docker image — live 2026-08-29: `ghcr.io/idebunk/cachegate:latest`
 - Pushed from the CEO's own machine (same credential/scope limitation
@@ -613,6 +625,17 @@ become a second undocumented list.
   same page even after a refresh, which looks like a stale/broken
   query-string filter on GitHub's own UI rather than a real state
   problem, and wasn't worth chasing further.
+- **Update 2026-08-30 - actually closed, not just deprioritized**: used
+  the package's own "Connect Repository" button (`Package settings` →
+  `Link this package to a repository`) and connected it to
+  `iDebunk/cachegate` specifically - worth naming plainly that the repo
+  picker also offered the private `2000_1010_memocode01` monorepo (same
+  owner, so GHCR's "must be the same owner" rule doesn't rule it out on
+  its own), which would have been a real mistake to pick, not just a
+  wrong label - a public package's page pointing at a private internal
+  repo defeats the entire point of the sync-out design. Verified after
+  connecting: the package page now shows `cachegate`'s actual README
+  content, confirming the correct repo, not the monorepo's.
 - **Verified for real, cold, from a machine that has never built this
   project**: `docker logout ghcr.io` (drops all local credentials),
   then `docker rmi` both local tags, then `docker pull
@@ -632,32 +655,154 @@ become a second undocumented list.
 
 ## Group E — Tell people, then keep it alive (steps 19-20)
 
-### 19. ⬜ Announce
-- Per `ROADMAP.md`'s existing plan: Hacker News (Show HN post),
-  r/LocalLLaMA, r/selfhosted, Dev.to - each gets its own framing (Show
-  HN wants the honest savings number and the self-hosted angle;
-  r/selfhosted wants the Docker one-liner front and center; Dev.to
-  supports a longer "why we built this" writeup).
-- Write the honest version of "why this exists" - the real story (an
-  internal tool for MemoCode that turned out to be worth its own
-  release), not a manufactured origin story.
+### 19. ✅ Announce — posted live 2026-08-31
+- All four posts drafted with real, distinct framing (see the original
+  drafting notes below), delivered as a published Artifact ("launch
+  kit") plus a standalone downloadable `.html` file.
+- **Posted for real, live, from the CEO's own accounts** - the outward-
+  facing, hard-to-reverse action this session genuinely can't do
+  itself (no browser session or credentials on any of these
+  platforms). Confirmed done by the CEO directly; URLs weren't
+  collected/independently verified this pass, noted plainly rather
+  than implied otherwise.
+- **HN title had to be trimmed live**: the original draft title (~98
+  chars) exceeded Hacker News's 80-character limit - shortened to
+  `Show HN: cachegate – self-hosted, cost-aware caching proxy for LLMs`
+  (67 chars) on the spot, same core pitch intact.
+- **r/selfhosted was correctly skipped, not posted to**: its submit
+  flow required a mandatory flair, and one option was literally
+  "Release (No AI)" - cachegate was built with substantial AI
+  assistance (this whole roadmap's own execution is direct evidence),
+  so that flair genuinely didn't apply. Rather than force an
+  ill-fitting flair or imply something untrue, the CEO skipped that
+  specific subreddit outright - the right call, not a shortcut.
+- **r/SelfHostedAI posted instead** - a different, more narrowly-
+  focused subreddit (self-hosted AI tooling specifically) with no such
+  flair conflict, reached mid-session while navigating Reddit's submit
+  flow. A reasonable, arguably better-targeted substitution for the
+  fourth platform, not the originally-planned r/selfhosted.
+- **A near-miss caught before it mattered**: an early attempt landed on
+  `reddit.com/r/Art/submit` (a real subreddit for visual artwork, not
+  self-hosted software) - caught immediately from the page's own
+  "Title, Artist Name, Medium, Year" format requirement before
+  anything was submitted there.
+- Final four actually posted: **Hacker News** (Show HN), **r/LocalLLaMA**,
+  **r/SelfHostedAI** (substituted for r/selfhosted), **Dev.to**.
 
-### 20. ⬜ Post-launch triage plan
-- Decide who watches the new public repo's issues/PRs day-to-day (the
-  same "one agent holds the standing watch" model already used for
-  this team's own PRs, per `AGENTS.md`) - a public repo with no
-  visible maintainer activity in the first weeks reads as abandoned.
-- Define what "Phase 5 done" actually means so it doesn't stay
-  open-ended forever: e.g., shipped + stable for some real window with
-  no critical issues, or a first external contribution merged -
-  pick a concrete bar, not a vibe.
-- This is also the moment Phase 6 (the standalone/hosted, NOT
-  open-sourced) becomes buildable for real - it depends on this
-  engine being proven stable under outside use, not just internal
-  dogfooding.
+Original drafting notes (why each framing was chosen): Show HN leads
+with the honest savings range and the "what it doesn't do yet" list up
+front (that crowd asks about gaps in the first three comments
+regardless); r/LocalLLaMA leads with the one objection that sub raises
+immediately - no local-model backend yet - framed as an open
+contribution gap, not a hidden limitation; the self-hosted-targeted
+post puts the `docker run` one-liner and the healthcheck/no-telemetry
+details before any explanation; Dev.to is the one long-form piece with
+the real origin story (an internal MemoCode cost-control tool that
+turned out worth its own release) and the fullest explanation of the
+exact/semantic cache distinction.
+
+### 20. ✅ Post-launch triage plan — decided 2026-08-29
+
+**Who watches, and how, stated plainly instead of assumed:**
+`AGENTS.md`'s "one agent holds the standing watch" model (a Claude
+session subscribed to every open PR via `subscribe_pr_activity`) is
+what this team already uses internally - but it does not extend to
+`cachegate` automatically. This session's own repo access is scoped to
+a fixed list of repos for the environment it runs in, `cachegate`
+is not on that list, and adding it hit a real, already-documented
+limitation earlier in this same roadmap (`add_repo` on
+`iDebunk/cachegate` failing with an unresolved approval prompt, back
+in steps 15-16). So, honestly, for now:
+- **The CEO is the standing watch**, via GitHub's own native "Watch →
+  All Activity" on the repo plus notifications, not a Claude session -
+  that's the real, working mechanism today, not an aspiration.
+- **Response SLA**: first reply to any new issue or PR within 48
+  hours, even if just "looked at this, need more detail" or "queued,
+  will get to the actual fix by \<date\>" - a fast acknowledgment is
+  what prevents "reads as abandoned," not a fast fix.
+- **Revisit if the environment's repo scope ever includes
+  `iDebunk/cachegate`** (an access-grant change outside this session's
+  own control, not something to keep retrying) - at that point, a
+  Claude session picking up the exact same standing-watch model used
+  internally becomes possible for real, and is the right thing to
+  switch to.
+
+**"Phase 5 done" - one concrete bar, not a vibe:**
+Phase 5 (this whole roadmap) is done when **either** of these is true,
+whichever comes first, not both required:
+- 4 consecutive weeks live with no open critical issue (a security
+  vulnerability, data loss, or the router silently returning wrong
+  answers) at any point during that window, **or**
+- the first external (non-`iDebunk`) pull request is merged.
+A quiet repo with zero critical bugs for a month is success on its own
+terms; so is a total stranger trusting the code enough to send a real
+patch before that clock runs out. Either is real evidence the release
+worked - waiting for both would just be moving the goalpost.
+
+**Phase 6 unlock:** per `ROADMAP.md`, Phase 6 (a standalone/hosted
+product built on this same engine, explicitly NOT open-sourced itself)
+becomes buildable once the bar above is actually met - not before, and
+not automatically the moment it is either. Meeting the bar makes
+Phase 6 *plannable* for real, using evidence from actual outside use
+instead of internal dogfooding alone; starting to build it is still a
+separate, deliberate decision when that time comes.
 
 ---
 
-*Written 2026-08-29. Cross-referenced from `ROADMAP.md`'s Phase 5. Update
-status markers inline as each step closes - this document IS the tracker,
-not a one-time plan to be superseded by a better one later.*
+## Follow-ups discovered after the original 20 steps closed
+
+Not renumbered into the list above - the original 20 are a closed,
+honest historical record (see the scaffold-first rule in `AGENTS.md`).
+New real work discovered later gets its own dated entry here instead.
+
+### 21. ✅ Docker Hub mirror — live 2026-08-30: `docker.io/shipman/cachegate`
+
+Step 9 originally decided GHCR over Docker Hub, explicitly leaving the
+door open: *"Not closed off permanently: worth adding a Docker Hub
+mirror later if search-driven discovery turns out to matter."* Revisited
+because GHCR's own download counter turned out to be unreliable for
+this purpose (checked directly - the live package page shows "Total
+downloads: 0" even after step 18's own confirmed cold pull, so either
+anonymous pulls aren't counted or there's a reporting lag; not
+confirmed which) and Docker Hub remains a real, separate discovery
+surface people specifically search.
+
+- **Real wall hit, caught before it caused real confusion**: the plan
+  going in assumed the CEO's Docker Hub username was `cachegate`, matching
+  the project name. It isn't - `docker login` reported the real account
+  as `shipman`. First push to `cachegate/cachegate` correctly failed
+  (`insufficient_scope: authorization failed` - `shipman` has no write
+  access to a `cachegate` namespace). **Target corrected to
+  `docker.io/shipman/cachegate`** - Docker Hub auto-created the repo on
+  first push to that personal namespace, no separate creation step
+  needed.
+- **Also fixed while in here**: added standard OCI labels to the
+  Dockerfile (`org.opencontainers.image.source`, `.description`,
+  `.licenses`). `image.source` specifically is what GHCR reads to link
+  a package to its repo automatically on every future push - the
+  durable alternative to clicking "Connect Repository" by hand once,
+  which doesn't survive a re-publish. Same three-line cost, fixes the
+  cosmetic repo-link gap left open back at step 18 for good. GHCR's
+  already-published `:1.0.0`/`:latest` tags were deliberately left
+  untouched - not worth rewriting an immutable version tag for a
+  cosmetic label; it reaches GHCR naturally on the next real version
+  bump.
+- **Login was actually via Docker's device-code browser flow**, not a
+  pasted token at a password prompt - `docker login docker.io` opened
+  a one-time code + browser confirmation instead. Functionally
+  equivalent (an access token was still created and available as a
+  fallback), just a different, newer CLI flow than GHCR's or npm's.
+- **Not a CI automation, on purpose, matching GHCR's own precedent**:
+  pushed manually from the CEO's own machine, same credential/scope
+  category as steps 15-18 - not something this session can do directly.
+- **Verified for real, cold, same rigor as step 18**: `docker logout
+  docker.io` (drops all local credentials), `docker rmi` all local
+  tags, `docker pull docker.io/shipman/cachegate:latest` - succeeded
+  with zero credentials. Real digest:
+  `sha256:4d8548dda952ec1dceff6ff6a9c69e1c86d55193150395465f387c8da171a55e`.
+  First `curl /health` attempt hit the same timing gap seen at step 18
+  (container 1 second old, still `health: starting`) - not re-guessed
+  as a real bug this time, waited for `docker ps` to show `(healthy)`,
+  then `curl http://localhost:4002/health` returned
+  `{"status":"healthy","redis_connected":false,...}` - a genuine cold
+  pull-run-verify cycle on a second, independent registry.

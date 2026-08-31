@@ -80,6 +80,13 @@ npm install
 docker build -t cachegate .
 docker run -p 4000:4000 --env-file .env cachegate
 ```
+Or skip building it yourself — pre-built images are published on both
+GHCR and Docker Hub, kept in sync, either works the same:
+```bash
+docker pull ghcr.io/idebunk/cachegate:latest
+# or
+docker pull docker.io/shipman/cachegate:latest
+```
 The image runs as a non-root user, and its `HEALTHCHECK` calls the same
 `GET /health` endpoint documented below — `docker ps` shows `healthy`/
 `unhealthy` once the container's been up for a few seconds. **Redis is
@@ -114,6 +121,71 @@ npm start
 ```
 
 `.env` is gitignored. `.env.example` is only a reference template.
+
+## Wiring this into your app
+
+**cachegate works with any language, not just Node/JS.** It's a plain
+HTTP API (`POST /v1/chat/completions`) - your app calls it exactly the
+way it already calls Anthropic or OpenAI directly, just pointed at a
+different URL. Python, Go, Rust, Swift, curl, a mobile app - if it can
+make an HTTP request, it can use cachegate. The only place Node.js is
+ever required is the one folder cachegate's own process runs from -
+never the app calling it.
+
+**`MODEL_ROUTER_INTERNAL_KEY` is not a key this project ships with.**
+It's a secret *you* generate (`openssl rand -hex 32`, a password
+manager, anything random) and put in cachegate's own `.env`. Its only
+job is stopping a stranger who reaches your running instance from
+spending your real Anthropic/OpenAI budget for free. Your app then
+sends that same value back as `Authorization: Bearer <your-key>` on
+every request — think of it the same way you'd think of a database
+password for a service you're standing up, not something built in.
+
+**cachegate's `.env` is separate from your app's own `.env`.** It has
+nothing to do with your app's database URL, its own auth secrets, or
+anything else your app already configures — mixing them into one file
+risks real collisions (if your app already uses `PORT` for its own
+server, for instance). Where that `.env` actually needs to live depends
+on how you're running it:
+
+- **`npx cachegate` / a standalone clone**: reads `.env` from whatever
+  directory you run the command *from* - not a fixed path tied to the
+  installed package. Run it from a dedicated folder made for this
+  purpose, rather than your app's own project root - otherwise you'll
+  either get a confusing "won't start" if there's no `.env` there, or
+  it'll silently pick up whatever unrelated `.env` happens to already
+  be in that folder.
+- **Docker**: `docker run --env-file .env ...` - the file lives on the
+  host wherever you run that command; it's injected only into
+  cachegate's own container, never shared with anything else.
+
+**Two ways to place it - pick based on how you want to deploy, not
+based on what language your app is written in:**
+
+| | Where it lives | What your app needs |
+|---|---|---|
+| **Standalone** | Its own server, its own repo entirely | Nothing - any language, calls it over HTTP like any other service |
+| **Colocated** | A subfolder inside your own repo (e.g. `your-app/router/`) | Nothing - only that one subfolder needs Node/npm installed |
+
+Both are the exact same mechanism underneath - `npx cachegate` (or a
+clone, or Docker) running as its own standalone process with its own
+`.env`, listening on its own port. The only difference is where you put
+the folder. Pick **standalone** if cachegate should be one shared
+service serving multiple apps (or you'd rather manage it as its own
+deployable thing). Pick **colocated** if you want everything - your app
+plus its router - in one repo, one place to look, no second project to
+maintain (this is exactly how this router lives inside MemoCode's own
+monorepo today).
+
+**Reaching it once it's running:**
+- Same machine, calling app not containerized: `http://localhost:4000`.
+- Both sides in Docker: put both containers on one Docker network (a
+  `docker-compose.yml` does this automatically) and reach it by service
+  name, e.g. `http://cachegate:4000` - Docker's own internal DNS handles
+  the rest.
+- Genuinely separate hosts: put cachegate behind a reverse proxy
+  (Caddy/nginx/Traefik) for HTTPS rather than exposing its raw port to
+  the internet directly.
 
 ## Usage
 

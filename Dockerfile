@@ -1,4 +1,12 @@
 FROM node:20-slim
+
+# Standard OCI labels - GHCR reads image.source automatically on every push
+# and uses it to link this package to the repo (the alternative to clicking
+# "Connect Repository" by hand once, which doesn't survive a re-publish).
+LABEL org.opencontainers.image.source="https://github.com/iDebunk/cachegate" \
+      org.opencontainers.image.description="Self-hostable, OpenAI-compatible LLM proxy: routes to the cheapest healthy provider, caches responses exactly and semantically, tracks cost and latency per call." \
+      org.opencontainers.image.licenses="MIT"
+
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
