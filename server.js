@@ -1,7 +1,27 @@
 #!/usr/bin/env node
 // model-router/server.js
-require('dotenv').config();
 const path = require('path');
+
+// Optional --env-path <file> / --env-path=<file> override, supported
+// alongside (not instead of) the default cwd-based .env lookup: pass it
+// and cachegate reads .env from wherever you point it, regardless of
+// where you're running the command from; omit it and behavior is
+// unchanged from before this flag existed. See README "Wiring this into
+// your app" for why the cwd-only default was a real friction point.
+function resolveEnvPathFromArgv(argv) {
+  const eqArg = argv.find((a) => a.startsWith('--env-path='));
+  if (eqArg) return path.resolve(eqArg.slice('--env-path='.length));
+
+  const flagIndex = argv.indexOf('--env-path');
+  if (flagIndex !== -1 && argv[flagIndex + 1]) {
+    return path.resolve(argv[flagIndex + 1]);
+  }
+
+  return undefined;
+}
+
+const customEnvPath = resolveEnvPathFromArgv(process.argv);
+require('dotenv').config(customEnvPath ? { path: customEnvPath } : undefined);
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const cache = require('./cache');
@@ -665,4 +685,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, isAuthConfigured };
+module.exports = { app, isAuthConfigured, resolveEnvPathFromArgv };

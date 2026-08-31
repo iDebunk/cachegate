@@ -57,8 +57,10 @@ gap — see `CONTRIBUTING.md` before opening one for it.
 ```bash
 npx cachegate
 ```
-Reads config from `.env` in the current directory, same as every other
-option below — there's no separate config path for this one.
+Reads config from `.env` in the current directory by default, same as
+every other option below. Pass `--env-path <file>` (e.g. `npx cachegate
+--env-path ./router/.env`) to point it at a `.env` anywhere else instead
+— see "Wiring this into your app" below for why that's useful.
 
 **Standalone** (this repo on its own):
 ```bash
@@ -148,13 +150,18 @@ risks real collisions (if your app already uses `PORT` for its own
 server, for instance). Where that `.env` actually needs to live depends
 on how you're running it:
 
-- **`npx cachegate` / a standalone clone**: reads `.env` from whatever
-  directory you run the command *from* - not a fixed path tied to the
-  installed package. Run it from a dedicated folder made for this
-  purpose, rather than your app's own project root - otherwise you'll
-  either get a confusing "won't start" if there's no `.env` there, or
-  it'll silently pick up whatever unrelated `.env` happens to already
-  be in that folder.
+- **`npx cachegate` / a standalone clone**: by default, reads `.env`
+  from whatever directory you run the command *from* - not a fixed path
+  tied to the installed package. Run it from a dedicated folder made
+  for this purpose, rather than your app's own project root - otherwise
+  you'll either get a confusing "won't start" if there's no `.env`
+  there, or it'll silently pick up whatever unrelated `.env` happens to
+  already be in that folder. **Or skip the folder-matching entirely**:
+  `npx cachegate --env-path ./router/.env` reads from wherever you point
+  it, regardless of where you're standing - useful for a `package.json`
+  script (`"start:router": "npx cachegate --env-path ./router/.env"`),
+  CI, or running it from your project root without ever `cd`-ing into
+  the colocated subfolder below.
 - **Docker**: `docker run --env-file .env ...` - the file lives on the
   host wherever you run that command; it's injected only into
   cachegate's own container, never shared with anything else.

@@ -806,3 +806,50 @@ surface people specifically search.
   then `curl http://localhost:4002/health` returned
   `{"status":"healthy","redis_connected":false,...}` - a genuine cold
   pull-run-verify cycle on a second, independent registry.
+
+### 22. 🟨 `--env-path` flag - built 2026-08-31, not yet republished
+
+Decided after a design discussion with the CEO: the cwd-only `.env`
+lookup (`npx cachegate` reads `.env` from wherever you happen to be
+standing, not a fixed path) was a real, repeated point of confusion -
+see step 21's own README work on "Wiring this into your app." Weighed
+against a second candidate (per-app keys / usage tracked separately per
+caller) and deliberately NOT building that one: the README already
+states this is "a single-operator, self-hosted admin tool, not a
+multi-tenant product," and real per-app key custody is explicitly
+named in "What this is NOT" as reserved for the separate, closed,
+hosted product this engine may one day sit under - building it into
+the free engine now would cannibalize that product's own future
+differentiation, not just cost more effort.
+
+- **What was built**: an optional `--env-path <file>` /
+  `--env-path=<file>` flag, parsed from `process.argv` before
+  `dotenv.config()` runs. Backward compatible by construction - no flag
+  given behaves exactly as before (reads `.env` from the current
+  directory); flag given reads from wherever it points instead,
+  resolved relative to the invoking directory or absolute as given.
+  `resolveEnvPathFromArgv` extracted as its own small, pure, exported
+  function specifically so this could be unit-tested directly rather
+  than through a heavier process-spawning test.
+- **Verified twice, not once**: 6 new unit tests
+  (`test/env-path.test.js`) covering both flag syntaxes
+  (`--env-path X` and `--env-path=X`), absolute paths, the flag missing
+  entirely, the flag present with no value after it, and other
+  unrelated flags not interfering. Full suite: 105/105 passing. Then a
+  real, live smoke test on top of the unit tests - not just trusting
+  them - starting `node server.js --env-path <path>` from a directory
+  with no `.env` at all, pointing at a real `.env` (with a distinct
+  `PORT=4099`) in a completely different location, and confirming via
+  `curl /health` that it actually started on the port from that other
+  file, not the default.
+- **`README.md` updated** in both places that described the old
+  cwd-only behavior as absolute ("there's no separate config path for
+  this one") - both now correctly describe the flag as an option.
+- **Version bumped to `1.1.0`** (`package.json` + regenerated
+  `package-lock.json`) - a real, backward-compatible feature addition,
+  not a patch.
+- **Not done yet, on purpose**: this needs republishing to all three
+  registries (npm, GHCR, Docker Hub) before it's real for anyone
+  outside this monorepo, same cost and rigor as every other publish
+  step in this document - not marking this ✅ until that's actually
+  done and cold-verified again.
