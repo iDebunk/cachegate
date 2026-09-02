@@ -1,0 +1,25 @@
+# cachegate's own .gitignore - the public repo (and anyone who clones
+# it directly) never had one, relying entirely on the internal
+# monorepo's root-level .gitignore, which lives outside this directory
+# and never syncs out via sync-oss-release.sh. Found the hard way: a
+# real `npm ci` + live-verification run in the public checkout left
+# node_modules/ untracked-but-present with nothing to stop `git add -A`
+# from picking it up.
+
+node_modules/
+npm-debug.log*
+
+# Local env files - .env.example is the only one meant to be tracked.
+.env
+.env.*
+!.env.example
+
+# This router's own JSONL metrics storage default (metrics.js's
+# DATA_DIR) - never meant to be committed, whether run from a clone of
+# this repo directly or synced from the monorepo (which already
+# excludes it at the root, but this directory needs its own copy of
+# that rule for the same reason as node_modules/ above).
+data/
+
+*.log
+coverage/
