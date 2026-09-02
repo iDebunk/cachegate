@@ -147,6 +147,15 @@ const COMPARISON_OUTPUT_TOKENS = 500;
 // (in which case we still have to pick one - see pickCandidate).
 const UNHEALTHY_ERROR_RATE = 0.5;
 
+// Minimum number of recent requests before a provider's error rate is
+// treated as meaningful. Without this, a brand-new provider (or one whose
+// traffic just resumed) with a SINGLE request that happened to error has
+// errorRate 1.0 and flips unhealthy instantly; 1/1 or 1/2 errors is noise,
+// not a signal. Below this sample size a provider is always considered
+// healthy (insufficient data to judge) so one unlucky request can't bounce
+// it out of rotation.
+const MIN_HEALTH_SAMPLES = Number(process.env.ROUTER_HEALTH_MIN_SAMPLES) || 5;
+
 /**
  * Choose a {provider, model} pair for a virtual model name. Always
  * excludes unhealthy candidates first (recent error rate too high,
@@ -154,15 +163,42 @@ const UNHEALTHY_ERROR_RATE = 0.5;
  * ROUTER_STRATEGY, default "cost") decides how what's left gets ranked.
  * See the strategy comment above loadStrategy() for what each one
  * actually does.
+ *
+ * `scope` (seams work): passed straight through to metrics.providerStats
+ * - null/undefined (every call site in this codebase today) means the
+ * platform-wide rolling health this always used, byte-identical to
+ * before this parameter existed. A caller that passes a real scope gets
+ * that scope's OWN rolling health instead - deliberately left as a
+ * choice for whoever configures auth (see server.js's `configure()`),
+ * not decided here: per-scope health isolates one tenant's provider
+ * trouble from every other tenant's routing, platform-wide health
+ * reacts faster (more samples) but lets one tenant's bad luck degrade
+ * everyone's routing. This function doesn't take a side.
  */
-async function pickCandidate(virtualModel) {
+async function pickCandidate(virtualModel, scope) {
   const tiers = loadTiers();
   const candidates = tiers[virtualModel];
   if (!candidates || candidates.length === 0) {
     return { error: `Unknown routing tier: ${virtualModel}` };
   }
 
-  const stats = await metrics.providerStats();
+  // The metrics store being unreachable must not take routing down with
+  // it: health/latency data is an INPUT to the ranking below, not a
+  // prerequisite for it. Degrade to the exact state a brand-new
+  // deployment with zero history already routes in (every candidate
+  // healthy, latency unknown, cost-only ordering) rather than failing
+  // the request - a gateway's job during a dependency blip is to keep
+  // serving, and the per-candidate failover at dispatch time still
+  // catches a provider that's genuinely broken. Without this, a
+  // Postgres-backed metrics outage turned every router:* request into an
+  // unhandled rejection that crashed the process outright (Express 4
+  // never sees async rejections).
+  let stats = {};
+  try {
+    stats = await metrics.providerStats(scope);
+  } catch (err) {
+    console.warn('⚠️ providerStats unavailable - routing on cost only:', err.message);
+  }
 
   const scored = candidates.map((candidate) => {
     const estimate = estimatorFor(candidate.provider);
@@ -175,7 +211,7 @@ async function pickCandidate(virtualModel) {
       estimatedCostUsd,
       errorRate: providerStat.errorRate,
       avgLatencyMs: providerStat.avgLatencyMs,
-      healthy: providerStat.errorRate < UNHEALTHY_ERROR_RATE
+      healthy: providerStat.sampleSize < MIN_HEALTH_SAMPLES || providerStat.errorRate < UNHEALTHY_ERROR_RATE
     };
   });
 

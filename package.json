@@ -1,12 +1,26 @@
 {
   "name": "cachegate",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Self-hostable, OpenAI-compatible LLM proxy: routes to the cheapest healthy provider, caches responses exactly and semantically, tracks cost and latency per call.",
   "license": "MIT",
   "main": "server.js",
   "bin": {
     "cachegate": "./server.js"
   },
+  "files": [
+    "server.js",
+    "cache.js",
+    "embeddings.js",
+    "failover.js",
+    "metrics.js",
+    "redisClient.js",
+    "router.js",
+    "semanticCache.js",
+    "streaming.js",
+    "providers/",
+    "public/",
+    ".env.example"
+  ],
   "engines": {
     "node": ">=18.0.0"
   },

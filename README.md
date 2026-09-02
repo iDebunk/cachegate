@@ -21,8 +21,9 @@ fills instead:
   now ship a more sophisticated vector-indexed semantic cache than this
   project's brute-force cosine scan — stated plainly, not glossed over;
   see "Two kinds of cache hit" below for what this one actually does.)
-- **Node.js/TypeScript-native** — most comparable gateways are Python;
-  this fits directly into a JS/TS stack with no cross-language bridge.
+- **Node.js-native (plain JavaScript, no build step)** — most comparable
+  gateways are Python; this fits directly into a JS/TS stack with no
+  cross-language bridge.
 - **Small and embeddable** — a handful of files, no framework beyond
   Express, easy to read end to end and drop into an existing app's own
   backend rather than standing up a separate service.
@@ -224,12 +225,15 @@ curl http://localhost:4000/v1/chat/completions \
   }'
 ```
 
-`GET /health` lists the configured tiers and the active routing
-strategy. Tiers are defined in `router.js` (`DEFAULT_TIERS`) and can be
-overridden per deployment via the `ROUTER_TIERS_JSON` env var; the
-strategy is `ROUTER_STRATEGY` (`cost` / `latency` / `latency-guarded-cost`,
-default `cost`) - see "Where this leaves things" below for what each
-one actually does.
+`GET /stats` (auth required) lists the configured tiers and the active
+routing strategy, alongside which providers have a key configured -
+security-review finding (2026-09-02): this used to live on the PUBLIC
+`GET /health` instead, world-readable internal routing configuration
+with no reason to be. Tiers are defined in `router.js`
+(`DEFAULT_TIERS`) and can be overridden per deployment via the
+`ROUTER_TIERS_JSON` env var; the strategy is `ROUTER_STRATEGY` (`cost` /
+`latency` / `latency-guarded-cost`, default `cost`) - see "Where this
+leaves things" below for what each one actually does.
 
 Streamed dispatch - add `"stream": true` to either form above and get
 back SSE chunks instead of one JSON body (see "Streaming" below for
@@ -263,7 +267,12 @@ auth, for local development only.
 - OpenAI-compatible `/v1/chat/completions` endpoint - direct dispatch to
   a named provider model, or routed dispatch via a `router:` capability
   tier (cheapest currently-healthy candidate, by estimated cost; see
-  `router.js`).
+  `router.js`). "Unhealthy" means a recent error rate of 50% or higher
+  over that provider's own rolling request window - but only once it has
+  at least `ROUTER_HEALTH_MIN_SAMPLES` (default 5) recent requests to
+  judge from; below that, a provider is always treated as healthy, so a
+  single unlucky request (1/1 or 1/2 errors) can't bounce it out of
+  rotation on noise alone.
 - **`stream: true` works** for plain text content, on both providers,
   including replaying a cache hit (exact or semantic) as a stream so a
   streaming caller still gets the caching benefit. See "Streaming"
@@ -287,10 +296,12 @@ auth, for local development only.
   history to work from, not just a number thrown away after each
   response.
 - Rate limiting on `/v1/*` (`RATE_LIMIT_MAX` requests per
-  `RATE_LIMIT_WINDOW_MS`, defaults 60/60s) - this proxy sits in front of
+  `RATE_LIMIT_WINDOW_MS`, defaults 300/60s) - this proxy sits in front of
   paid, metered keys, so an unbounded client has no ceiling otherwise.
-- `GET /health` for monitoring (public, no auth) and `GET /stats` for a
-  quick record-count-windowed aggregate snapshot (auth required).
+- `GET /health` for monitoring (public, no auth - deliberately minimal:
+  process/dependency status only, no provider or routing configuration)
+  and `GET /stats` for a quick record-count-windowed aggregate snapshot,
+  plus the configured providers/tiers/strategy (auth required).
 - **A cost dashboard** at `GET /dashboard` - a static page (no auth
   itself; its own JS asks for the internal key and stores it in
   localStorage, then calls the authenticated data endpoint below) with
@@ -332,6 +343,13 @@ larger completion call on a future near-duplicate. It's worth it when
 near-duplicate traffic is common; it's pure overhead when it isn't. Set
 `SEMANTIC_CACHE_ENABLED=false` to disable it outright while keeping the
 exact-match cache and `OPENAI_API_KEY` for other things.
+
+Both embedding calls carry a hard timeout (`EMBEDDING_TIMEOUT_MS`,
+default 5000ms) - they sit on the hot request path of every cache miss,
+so a hung embedding provider degrades to "skip semantic caching for this
+request" instead of stalling chat traffic that has nothing to do with
+OpenAI (an Anthropic-only request still needs an embedding call to check
+the semantic cache).
 
 Storage is a plain Redis list per model, capped at
 `SEMANTIC_CACHE_MAX_CANDIDATES` (default 200) - a lookup does a
@@ -447,7 +465,7 @@ positioning. A few things worth knowing before relying on it:
     fraction of a cent, not a full re-ranking. With no latency data at
     all yet, it degrades to plain `cost`.
 
-  `GET /health` reports the active strategy (`routing_strategy`); a
+  `GET /stats` reports the active strategy (`routing_strategy`); a
   decision's `reason.strategy` and `reason.latencyGuardExcludedACandidate`
   say which one ran and whether the guard actually did anything, same
   transparency style as the rest of the routing decision. Tier

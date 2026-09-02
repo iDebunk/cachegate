@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // model-router/server.js
 const path = require('path');
+const crypto = require('crypto');
 
 // Optional --env-path <file> / --env-path=<file> override, supported
 // alongside (not instead of) the default cwd-based .env lookup: pass it
@@ -39,6 +40,27 @@ const app = express();
 // benefit).
 app.disable('x-powered-by');
 
+// Defense-in-depth backstop, the same treatment the MemoCode backend
+// already carries (its PRs #67/#71): Express 4 does NOT route an async
+// route handler's rejected promise to the error middleware at the bottom
+// of this file - left unguarded, Node's default since v15 is to crash
+// the whole process, taking every other in-flight request with it. The
+// route-level try/catches in /stats, /dashboard/data, and /v1's routing
+// decision below are the primary fix; these hooks catch anything a
+// future edit misses. The two failure shapes are deliberately treated
+// differently (same reasoning as the backend's own PR #71): an
+// unhandledRejection is one async operation's scoped failure - log and
+// keep serving everyone else; an uncaughtException leaves the process in
+// an unknown, possibly corrupted state - log and exit, letting whatever
+// runs this (Docker, Render, Kubernetes) restart it clean.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection (server kept running):', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception (server exiting so the platform restarts it clean):', err);
+  process.exit(1);
+});
+
 const PORT = process.env.PORT || 4000;
 const INTERNAL_KEY = process.env.MODEL_ROUTER_INTERNAL_KEY;
 const ALLOW_INSECURE_LOCAL_DEV = process.env.ALLOW_INSECURE_LOCAL_DEV === 'true';
@@ -58,20 +80,89 @@ function isAuthConfigured() {
 
 // Internal authentication: every request must carry the shared internal key.
 // Health check is intentionally public so load balancers can monitor the service.
-function requireInternalKey(req, res, next) {
-  if (!INTERNAL_KEY) {
-    // Only reachable when ALLOW_INSECURE_LOCAL_DEV=true was explicitly set above.
-    return next();
+
+// Constant-time comparison of the shared internal key. A plain `!==`
+// comparison short-circuits on the first differing byte, which in theory
+// leaks how many leading bytes of a guessed key are correct via response
+// timing. Both sides are hashed to equal length first (so
+// timingSafeEqual's equal-length requirement holds regardless of the raw
+// key lengths), then compared in constant time. Low practical severity for
+// a single shared secret, but free to do right.
+function constantTimeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+// --- Extension seams (roadmap: engine/cloud "wrap it, don't fork it") ---
+// A deployer needing real multi-tenancy (issued-key auth instead of one
+// shared internal key, per-tenant BYOK provider keys, per-tenant rate
+// limiting) overrides these via configure() below instead of forking
+// this file - the fork this project's own Cachegate Cloud build had to
+// maintain until now, duplicating every one of these decisions across a
+// full copy of server.js. Every default here is EXACTLY today's
+// single-tenant, unconfigured behavior - never calling configure()
+// changes nothing about how this server behaves.
+const seams = {
+  // (req) => Promise<{ scope, error? }> | { scope, error? }. Runs where
+  // requireInternalKey used to run unconditionally: as the FIRST /v1
+  // middleware, before the rate limiter even sees the request, exactly
+  // like today. `scope` is an opaque value (null = today's single
+  // global tenant) threaded through to every cache/metrics/router call
+  // this file makes below; `{ error: { status, message } }` rejects the
+  // request with that status before body parsing/dispatch ever runs.
+  // Default: today's shared-internal-key check, scope always null.
+  authenticate: async (req) => {
+    if (!INTERNAL_KEY) return { scope: null }; // only reachable when ALLOW_INSECURE_LOCAL_DEV=true
+    const authHeader = req.headers.authorization || '';
+    const providedKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    if (!providedKey || !constantTimeEqual(providedKey, INTERNAL_KEY)) {
+      return { scope: null, error: { status: 401, message: 'Unauthorized' } };
+    }
+    return { scope: null };
+  },
+
+  // (scope, provider) => string | null | Promise<string | null>. Default:
+  // today's single shared process.env key, the same for every scope. A
+  // BYOK-style deployer overrides this to look the key up per-scope
+  // instead - and since a real per-scope lookup is usually a database
+  // read (Cachegate Cloud's is a Postgres fetch + decrypt), the resolver
+  // may return a Promise; every call site below awaits it, which is a
+  // no-op for a synchronous resolver, so both shapes are first-class.
+  // (See the callers below: they never cache a client built from a
+  // non-default resolver's key, so a decrypted per-tenant secret never
+  // outlives the one request it was resolved for.)
+  resolveProviderKey: (scope, provider) =>
+    (provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY) || null,
+
+  // Passed straight through as express-rate-limit's own `keyGenerator`.
+  // Default: undefined, so express-rate-limit's own per-IP default
+  // applies - exactly today's behavior. A deployer with a real per-
+  // caller identity (e.g. req.scope, once authenticate() sets one)
+  // overrides this to key the limiter on that instead of shared IP.
+  rateLimitKeyGenerator: undefined
+};
+
+// Overrides one or more of the seams above. Safe to call anytime before
+// the first request is handled (the functions above are read fresh on
+// every request, not baked into route wiring at module-load time) -
+// typically once, at process startup, by whatever imports this module.
+// Never called anywhere in this codebase itself, so this file's own
+// behavior is unaffected unless a caller opts in.
+function configure(overrides = {}) {
+  Object.assign(seams, overrides);
+}
+
+async function requireInternalKey(req, res, next) {
+  try {
+    const { scope, error } = await seams.authenticate(req);
+    if (error) return res.status(error.status).json({ error: error.message });
+    req.scope = scope;
+    next();
+  } catch (err) {
+    console.error('❌ Auth error:', err.message);
+    res.status(500).json({ error: 'Authentication failed.' });
   }
-
-  const authHeader = req.headers.authorization || '';
-  const providedKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-
-  if (providedKey !== INTERNAL_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  next();
 }
 
 // Rate limiting: this proxy sits in front of paid, metered API keys -
@@ -105,11 +196,21 @@ function requireInternalKey(req, res, next) {
 // them from each other - the "shared ceiling" caveat above is specific
 // to a deployment with exactly one caller identity, not a general
 // limitation of the rate limiter itself.
+// keyGenerator reads `seams.rateLimitKeyGenerator` fresh on every
+// request (a closure, not a value captured once here) - so a
+// configure() call after this file loads (the normal case: a wrapping
+// deployment configures before its first request, right after
+// requiring this module) still takes effect. Falls back to
+// express-rate-limit's own recommended IPv6-safe IP keying
+// (ipKeyGenerator) when never configured - not a bare `req.ip`, which
+// the library itself warns can let IPv6 users bypass limits (same
+// default it would have used had this option been omitted entirely).
 const rateLimiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 60_000,
   limit: Number(process.env.RATE_LIMIT_MAX) || 300,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req, res) => (seams.rateLimitKeyGenerator ? seams.rateLimitKeyGenerator(req, res) : rateLimit.ipKeyGenerator(req.ip)),
   message: { error: 'Too many requests - rate limit exceeded' }
 });
 
@@ -129,36 +230,56 @@ const readEndpointLimiter = rateLimit({
   message: { error: 'Too many requests - rate limit exceeded' }
 });
 
-// JSON body parsing scoped to /v1 only, AFTER auth and rate limiting -
+// JSON body parsing scoped to /v1 only, AFTER rate limiting and auth -
 // security-review finding (2026-08-29): this used to be
 // app.use(express.json({limit:'50mb'})) applied GLOBALLY, before any
 // auth check, on every route. That meant an ANONYMOUS caller could
 // force up to 50MB of JSON parsing per request before ever being
 // rejected with 401 - a real resource-exhaustion vector once this is
-// exposed to the internet, not just a theoretical one. Fixed two ways
+// exposed to the internet, not just a theoretical one. Fixed three ways
 // at once: (1) scoped to /v1, the only route that ever reads a body -
 // /health, /stats, /dashboard/data, /dashboard are all GET with
-// nothing to parse; (2) ordered after requireInternalKey and
-// rateLimiter, both cheap checks, so an unauthenticated or
-// over-the-limit request is rejected before any parsing happens at
-// all; (3) the limit itself dropped from 50mb to a much more realistic
-// default - this router only ever handles plain text chat content (no
-// image/multimodal support - see providers/*.js), so even a very long
-// conversation history comfortably fits well under 2MB of raw JSON.
-app.use('/v1', requireInternalKey, rateLimiter, express.json({ limit: process.env.JSON_BODY_LIMIT || '2mb' }));
+// nothing to parse; (2) ordered so the RATE LIMITER runs first, then
+// auth, then body parsing - rate limiting before auth means even a
+// failed-auth request (a brute-force key guess, say) is counted and
+// throttled, rather than being rejected by requireInternalKey before
+// ever reaching the limiter (the original order let unauthenticated
+// callers hammer the auth check at full speed, outside the limiter's
+// reach); both are cheap checks, so an over-the-limit OR unauthenticated
+// request is rejected before any parsing happens at all; (3) the limit
+// itself dropped from 50mb to a much more realistic default - this
+// router only ever handles plain text chat content (no image/multimodal
+// support - see providers/*.js), so even a very long conversation
+// history comfortably fits well under 2MB of raw JSON.
+app.use('/v1', rateLimiter, requireInternalKey, express.json({ limit: process.env.JSON_BODY_LIMIT || '2mb' }));
 
-// Lazy clients, constructed only when a request actually needs them.
+// Lazy clients, constructed only when a request actually needs them -
+// but ONLY cached for the default global scope (null): that's the only
+// case where `seams.resolveProviderKey` is guaranteed to return the
+// same key on every call (today's single process.env key). Once a
+// deployer configures a real per-scope resolver (BYOK, decrypted per
+// tenant), every call below builds a fresh client instead of caching
+// one - a decrypted secret must never outlive the one request it was
+// resolved for.
 let anthropicClient;
 let openaiClient;
 
-function getAnthropicClient() {
-  if (!anthropicClient) anthropicClient = anthropicProvider.buildClient(process.env.ANTHROPIC_API_KEY);
-  return anthropicClient;
+async function getAnthropicClient(scope) {
+  const key = await seams.resolveProviderKey(scope, 'anthropic');
+  if (scope == null) {
+    if (!anthropicClient) anthropicClient = anthropicProvider.buildClient(key);
+    return anthropicClient;
+  }
+  return anthropicProvider.buildClient(key);
 }
 
-function getOpenAiClient() {
-  if (!openaiClient) openaiClient = openaiProvider.buildClient(process.env.OPENAI_API_KEY);
-  return openaiClient;
+async function getOpenAiClient(scope) {
+  const key = await seams.resolveProviderKey(scope, 'openai');
+  if (scope == null) {
+    if (!openaiClient) openaiClient = openaiProvider.buildClient(key);
+    return openaiClient;
+  }
+  return openaiProvider.buildClient(key);
 }
 
 function isModelAnthropic(model) {
@@ -169,17 +290,21 @@ function isModelOpenAi(model) {
   return model && (model.startsWith('gpt-') || model.startsWith('o1') || model.startsWith('o3'));
 }
 
+// Public and deliberately minimal - a load balancer only ever needs "is
+// this process up and can it reach its own dependencies", not internal
+// configuration. redis_connected/semantic_cache_enabled are pure
+// operational status (a monitoring dashboard's own "is the cache degraded
+// right now" signal, not a secret); which PROVIDERS have a key configured,
+// which routing TIERS/virtual models exist, and which STRATEGY picks
+// between them used to live here too - internal routing configuration with
+// no reason to be world-readable, unrelated to "is the process healthy".
+// Anyone who legitimately needs that (an operator holding the internal
+// key) gets it from GET /stats below instead.
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     redis_connected: cache.isConnected(),
-    semantic_cache_enabled: semanticCache.isEnabled(),
-    providers: {
-      anthropic: !!process.env.ANTHROPIC_API_KEY,
-      openai: !!process.env.OPENAI_API_KEY
-    },
-    routing_tiers: Object.keys(router.loadTiers()),
-    routing_strategy: router.loadStrategy()
+    semantic_cache_enabled: semanticCache.isEnabled()
   });
 });
 
@@ -196,27 +321,49 @@ app.get('/health', (req, res) => {
 // exactly the kind of thing that produces the inflated vendor numbers
 // this project's own market research called out - see semanticCache.js.
 app.get('/stats', requireInternalKey, readEndpointLimiter, async (req, res) => {
-  // Same fix as /dashboard/data below: `Number(x) || 200` would treat
-  // a legitimate ?limit=0 as falsy and silently substitute 200.
-  const parsedLimit = Number(req.query.limit);
-  const limit = Math.min(Number.isFinite(parsedLimit) ? parsedLimit : 200, 2000);
-  const [recent, byProvider] = await Promise.all([
-    metrics.readRecent(limit),
-    metrics.providerStats()
-  ]);
-  const totalCostUsd = recent.reduce((sum, r) => sum + (r.cost_usd || 0), 0);
-  const exactHits = recent.filter((r) => r.cache_hit && r.cache_type !== 'semantic').length;
-  const semanticHits = recent.filter((r) => r.cache_hit && r.cache_type === 'semantic').length;
-  res.json({
-    sample_size: recent.length,
-    cache_hit_rate: {
-      exact: recent.length ? exactHits / recent.length : 0,
-      semantic: recent.length ? semanticHits / recent.length : 0,
-      combined: recent.length ? (exactHits + semanticHits) / recent.length : 0
-    },
-    total_cost_usd: totalCostUsd,
-    by_provider: byProvider
-  });
+  try {
+    // Same fix as /dashboard/data below: `Number(x) || 200` would treat
+    // a legitimate ?limit=0 as falsy and silently substitute 200.
+    const parsedLimit = Number(req.query.limit);
+    const limit = Math.min(Number.isFinite(parsedLimit) ? parsedLimit : 200, 2000);
+    const [recent, byProvider] = await Promise.all([
+      metrics.readRecent(req.scope, limit),
+      metrics.providerStats(req.scope)
+    ]);
+    const totalCostUsd = recent.reduce((sum, r) => sum + (r.cost_usd || 0), 0);
+    const exactHits = recent.filter((r) => r.cache_hit && r.cache_type !== 'semantic').length;
+    const semanticHits = recent.filter((r) => r.cache_hit && r.cache_type === 'semantic').length;
+    res.json({
+      sample_size: recent.length,
+      cache_hit_rate: {
+        exact: recent.length ? exactHits / recent.length : 0,
+        semantic: recent.length ? semanticHits / recent.length : 0,
+        combined: recent.length ? (exactHits + semanticHits) / recent.length : 0
+      },
+      total_cost_usd: totalCostUsd,
+      by_provider: byProvider,
+      // Internal routing configuration - which providers have a key
+      // configured, which virtual-model tiers exist, and which strategy picks
+      // between them - moved here from the public GET /health (security-
+      // review finding, 2026-09-02): this endpoint already requires the
+      // internal key, /health never did.
+      providers: {
+        anthropic: Boolean(await seams.resolveProviderKey(req.scope, 'anthropic')),
+        openai: Boolean(await seams.resolveProviderKey(req.scope, 'openai'))
+      },
+      routing_tiers: Object.keys(router.loadTiers()),
+      routing_strategy: router.loadStrategy()
+    });
+  } catch (err) {
+    // A metrics-store failure is OUR dependency failing - surface it as
+    // an error rather than silently zeroing the numbers (a dashboard that
+    // quietly shows empty data during an outage is a lie), and never let
+    // it become an unhandled rejection: Express 4 doesn't route those to
+    // the error middleware, and Node's default would crash the process
+    // for every other in-flight request too.
+    console.error('Stats read error:', err.message);
+    res.status(500).json({ error: 'Failed to read metrics.' });
+  }
 });
 
 // The cost dashboard's data source - everything in one response so the
@@ -225,34 +372,43 @@ app.get('/stats', requireInternalKey, readEndpointLimiter, async (req, res) => {
 // `days` is clamped to a sane range; the dashboard page's date-range
 // picker calls this with 7/14/30.
 app.get('/dashboard/data', requireInternalKey, readEndpointLimiter, async (req, res) => {
-  // NOT `Number(req.query.days) || 14` - that treats a legitimate
-  // ?days=0 as falsy and silently swaps in the default instead of
-  // clamping it to 1. Only an actually-missing/non-numeric value should
-  // fall back; a real 0 should clamp, not vanish.
-  const parsedDays = Number(req.query.days);
-  const requestedDays = Number.isFinite(parsedDays) ? parsedDays : 14;
-  const days = Math.min(Math.max(requestedDays, 1), 90);
-  const [summary, providerHealth] = await Promise.all([
-    metrics.rangeSummary(days),
-    // Deliberately the ROLLING window (same one router.js itself uses to
-    // decide routing health), not the calendar one above - "is something
-    // wrong RIGHT NOW" is a different question than "how did the last N
-    // days look," and answering it from stale calendar history would mean
-    // an alert for a key that got fixed yesterday still shows today.
-    metrics.providerStats()
-  ]);
-  // Only providers with an actual recent error - a healthy deployment
-  // sends an empty array, and the dashboard renders nothing for it,
-  // instead of a permanent "0.0%" row nobody needs to see.
-  const provider_alerts = Object.entries(providerHealth)
-    .filter(([, stat]) => stat.lastErrorType)
-    .map(([provider, stat]) => ({
-      provider,
-      error_type: stat.lastErrorType,
-      error_rate: stat.errorRate,
-      last_error_at: stat.lastErrorAt
-    }));
-  res.json({ ...summary, provider_alerts });
+  try {
+    // NOT `Number(req.query.days) || 14` - that treats a legitimate
+    // ?days=0 as falsy and silently swaps in the default instead of
+    // clamping it to 1. Only an actually-missing/non-numeric value should
+    // fall back; a real 0 should clamp, not vanish.
+    const parsedDays = Number(req.query.days);
+    const requestedDays = Number.isFinite(parsedDays) ? parsedDays : 14;
+    const days = Math.min(Math.max(requestedDays, 1), 90);
+    const [summary, providerHealth] = await Promise.all([
+      metrics.rangeSummary(req.scope, days),
+      // Deliberately the ROLLING window (same one router.js itself uses to
+      // decide routing health), not the calendar one above - "is something
+      // wrong RIGHT NOW" is a different question than "how did the last N
+      // days look," and answering it from stale calendar history would mean
+      // an alert for a key that got fixed yesterday still shows today.
+      metrics.providerStats(req.scope)
+    ]);
+    // Only providers with an actual recent error - a healthy deployment
+    // sends an empty array, and the dashboard renders nothing for it,
+    // instead of a permanent "0.0%" row nobody needs to see.
+    const provider_alerts = Object.entries(providerHealth)
+      .filter(([, stat]) => stat.lastErrorType)
+      .map(([provider, stat]) => ({
+        provider,
+        error_type: stat.lastErrorType,
+        error_rate: stat.errorRate,
+        last_error_at: stat.lastErrorAt
+      }));
+    res.json({ ...summary, provider_alerts });
+  } catch (err) {
+    // Same shape as /stats above: a metrics-store failure is an error to
+    // surface, never an unhandled rejection that crashes the process -
+    // and never silently-empty data an operator would mistake for "no
+    // traffic".
+    console.error('Dashboard data read error:', err.message);
+    res.status(500).json({ error: 'Failed to read metrics.' });
+  }
 });
 
 // The dashboard page itself - static HTML/CSS/JS, no server-side
@@ -301,17 +457,17 @@ function streamCachedReplay(res, entry, cacheType) {
 // against more than one provider in the same request. Throws an error
 // with `.status` set so failover.isRetryableError() can decide whether
 // it's worth trying the next candidate.
-async function dispatchToProvider(provider, payload) {
+async function dispatchToProvider(scope, provider, payload) {
   if (provider === 'anthropic') {
-    if (!process.env.ANTHROPIC_API_KEY) {
+    if (!(await seams.resolveProviderKey(scope, 'anthropic'))) {
       throw Object.assign(new Error('ANTHROPIC_API_KEY not configured'), { status: 500 });
     }
-    return anthropicProvider.chat(getAnthropicClient(), payload);
+    return anthropicProvider.chat(await getAnthropicClient(scope), payload);
   }
-  if (!process.env.OPENAI_API_KEY) {
+  if (!(await seams.resolveProviderKey(scope, 'openai'))) {
     throw Object.assign(new Error('OPENAI_API_KEY not configured'), { status: 500 });
   }
-  return openaiProvider.chat(getOpenAiClient(), payload);
+  return openaiProvider.chat(await getOpenAiClient(scope), payload);
 }
 
 // The real streaming dispatch path: an actual cache miss, forwarded
@@ -325,13 +481,14 @@ async function dispatchToProvider(provider, payload) {
 // non-streaming case, left as a documented gap rather than shipped
 // half-working (see ROADMAP.md).
 async function handleStreamingDispatch(req, res, payload, requestedModel, routingDecision) {
+  const scope = req.scope;
   let providerName;
   if (isModelAnthropic(payload.model)) {
     providerName = 'anthropic';
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
+    if (!(await seams.resolveProviderKey(scope, 'anthropic'))) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
   } else if (isModelOpenAi(payload.model)) {
     providerName = 'openai';
-    if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: 'OPENAI_API_KEY not configured' });
+    if (!(await seams.resolveProviderKey(scope, 'openai'))) return res.status(500).json({ error: 'OPENAI_API_KEY not configured' });
   } else {
     return res.status(400).json({ error: `Unsupported model: ${payload.model}` });
   }
@@ -347,7 +504,7 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
 
   let result;
   try {
-    const client = providerName === 'anthropic' ? getAnthropicClient() : getOpenAiClient();
+    const client = providerName === 'anthropic' ? await getAnthropicClient(scope) : await getOpenAiClient(scope);
     const chatStreamFn = providerName === 'anthropic' ? anthropicProvider.chatStream : openaiProvider.chatStream;
     result = await chatStreamFn(client, payload, {
       signal: controller.signal,
@@ -362,7 +519,7 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
     res.write(streaming.errorFrame(err.message));
     res.write(streaming.doneFrame());
     res.end();
-    metrics.record({
+    metrics.record(scope, {
       provider: providerName,
       model: payload.model,
       requested_model: requestedModel,
@@ -373,8 +530,8 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
     return;
   }
 
-  await cache.set(payload, result);
-  await semanticCache.store(payload, result);
+  await cache.set(scope, payload, result);
+  await semanticCache.store(scope, payload, result);
 
   res.write(streaming.finalChunk({
     id,
@@ -387,7 +544,7 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
   res.write(streaming.doneFrame());
   res.end();
 
-  metrics.record({
+  metrics.record(scope, {
     provider: result.provider,
     model: result.model,
     requested_model: requestedModel,
@@ -399,6 +556,7 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
 
 app.post('/v1/chat/completions', async (req, res) => {
   const payload = req.body;
+  const scope = req.scope; // set by requireInternalKey/seams.authenticate - null unless configured
 
   if (!payload || !payload.model || !Array.isArray(payload.messages)) {
     return res.status(400).json({ error: 'Missing model or messages' });
@@ -425,7 +583,18 @@ app.post('/v1/chat/completions', async (req, res) => {
   // capability tier. Any other model name is dispatched exactly as
   // before, unchanged - an explicit model choice is never overridden.
   if (router.isVirtualModel(requestedModel)) {
-    routingDecision = await router.pickCandidate(requestedModel);
+    // Backstop: router.js already degrades a metrics-store failure to
+    // cost-only ranking internally (see its providerStats fallback), so
+    // this catch should be unreachable today - but an unguarded await
+    // here was a process-crash vector under Express 4 (async rejections
+    // never reach the error middleware), so guard it anyway rather than
+    // trust a comment to hold against future edits.
+    try {
+      routingDecision = await router.pickCandidate(requestedModel, scope);
+    } catch (err) {
+      console.error('Routing decision error:', err.message);
+      return res.status(500).json({ error: 'Routing decision failed.' });
+    }
     if (routingDecision.error) {
       return res.status(400).json({ error: routingDecision.error });
     }
@@ -438,9 +607,9 @@ app.post('/v1/chat/completions', async (req, res) => {
   // share the same cache entries). A hit is served the same way
   // whether or not the caller asked for stream:true - see
   // streamCachedReplay() for the streaming case.
-  const cached = await cache.get(payload);
+  const cached = await cache.get(scope, payload);
   if (cached) {
-    metrics.record({
+    metrics.record(scope, {
       provider: cached.provider,
       model: cached.model,
       requested_model: requestedModel,
@@ -473,10 +642,10 @@ app.post('/v1/chat/completions', async (req, res) => {
   // prompt, not an identical one). This costs one embedding call
   // whether or not it finds anything; see semanticCache.js for why
   // that's a deliberate tradeoff, not overhead to optimize away.
-  const semanticMatch = await semanticCache.findMatch(payload);
+  const semanticMatch = await semanticCache.findMatch(scope, payload);
   if (semanticMatch) {
     const hit = semanticMatch.entry;
-    metrics.record({
+    metrics.record(scope, {
       provider: hit.provider,
       model: hit.model,
       requested_model: requestedModel,
@@ -532,8 +701,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       // problem from the Provider alerts table.
       const attempt = await failover.dispatchWithFailover(
         routingDecision.rankedCandidates,
-        (candidate) => dispatchToProvider(candidate.provider, { ...payload, model: candidate.model }),
-        (candidate, err) => metrics.record({
+        (candidate) => dispatchToProvider(scope, candidate.provider, { ...payload, model: candidate.model }),
+        (candidate, err) => metrics.record(scope, {
           provider: candidate.provider,
           model: candidate.model,
           requested_model: requestedModel,
@@ -549,15 +718,15 @@ app.post('/v1/chat/completions', async (req, res) => {
         console.warn(`⚠️ Model router failover: ${routingDecision.provider}/${routingDecision.model} unavailable, served by ${attempt.candidate.provider}/${attempt.candidate.model} instead (attempt ${attempt.attempts}/${routingDecision.rankedCandidates.length})`);
       }
     } else if (isModelAnthropic(payload.model)) {
-      if (!process.env.ANTHROPIC_API_KEY) {
+      if (!(await seams.resolveProviderKey(scope, 'anthropic'))) {
         return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
       }
-      result = await anthropicProvider.chat(getAnthropicClient(), payload);
+      result = await anthropicProvider.chat(await getAnthropicClient(scope), payload);
     } else if (isModelOpenAi(payload.model)) {
-      if (!process.env.OPENAI_API_KEY) {
+      if (!(await seams.resolveProviderKey(scope, 'openai'))) {
         return res.status(500).json({ error: 'OPENAI_API_KEY not configured' });
       }
-      result = await openaiProvider.chat(getOpenAiClient(), payload);
+      result = await openaiProvider.chat(await getOpenAiClient(scope), payload);
     } else {
       return res.status(400).json({ error: `Unsupported model: ${payload.model}` });
     }
@@ -565,10 +734,10 @@ app.post('/v1/chat/completions', async (req, res) => {
     // Store in both caches - exact-match for identical future
     // requests, semantic for near-duplicate ones. Both no-op quietly if
     // their prerequisites (Redis / OPENAI_API_KEY) aren't configured.
-    await cache.set(payload, result);
-    await semanticCache.store(payload, result);
+    await cache.set(scope, payload, result);
+    await semanticCache.store(scope, payload, result);
 
-    metrics.record({
+    metrics.record(scope, {
       provider: result.provider,
       model: result.model,
       requested_model: requestedModel,
@@ -601,7 +770,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       // candidate as each fails (see the onAttemptFailed callback
       // above), including whichever one was last - recording again
       // here would double-count it.
-      metrics.record({
+      metrics.record(scope, {
         provider: isModelAnthropic(payload.model) ? 'anthropic' : 'openai',
         model: payload.model,
         requested_model: requestedModel,
@@ -685,4 +854,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, isAuthConfigured, resolveEnvPathFromArgv };
+module.exports = { app, isAuthConfigured, resolveEnvPathFromArgv, configure };

@@ -37,8 +37,12 @@ const MAX_CANDIDATES_PER_MODEL = Number(process.env.SEMANTIC_CACHE_MAX_CANDIDATE
 const DEFAULT_TTL_SECONDS = Number(process.env.SEMANTIC_CACHE_TTL_SECONDS) || 3600;
 const DEFAULT_THRESHOLD = Number(process.env.SEMANTIC_CACHE_THRESHOLD) || 0.93;
 
-function listKey(model) {
-  return `SEMANTIC_LIST:${model}`;
+// scope: same seams contract as cache.js's buildCacheKey - null/
+// undefined (every call site in this codebase today) means one global
+// per-model list, byte-identical to before this parameter existed; a
+// non-null scope gets its own list, isolated from every other scope's.
+function listKey(scope, model) {
+  return scope != null ? `SEMANTIC_LIST:${scope}:${model}` : `SEMANTIC_LIST:${model}`;
 }
 
 function cosineSimilarity(a, b) {
@@ -79,7 +83,7 @@ function isCacheable(payload) {
   return !payload.tools;
 }
 
-async function findMatch(payload, { threshold = DEFAULT_THRESHOLD, embeddings = embeddingsDefault } = {}) {
+async function findMatch(scope, payload, { threshold = DEFAULT_THRESHOLD, embeddings = embeddingsDefault } = {}) {
   if (!isEnabled(embeddings) || !isCacheable(payload)) return null;
 
   let queryEmbedding;
@@ -92,7 +96,7 @@ async function findMatch(payload, { threshold = DEFAULT_THRESHOLD, embeddings = 
 
   let raw;
   try {
-    raw = await redis.client.lRange(listKey(payload.model), 0, MAX_CANDIDATES_PER_MODEL - 1);
+    raw = await redis.client.lRange(listKey(scope, payload.model), 0, MAX_CANDIDATES_PER_MODEL - 1);
   } catch (err) {
     console.warn('⚠️ Semantic cache lookup failed:', err.message);
     return null;
@@ -114,7 +118,7 @@ async function findMatch(payload, { threshold = DEFAULT_THRESHOLD, embeddings = 
   return best;
 }
 
-async function store(payload, entry, { ttlSeconds = DEFAULT_TTL_SECONDS, embeddings = embeddingsDefault } = {}) {
+async function store(scope, payload, entry, { ttlSeconds = DEFAULT_TTL_SECONDS, embeddings = embeddingsDefault } = {}) {
   if (!isEnabled(embeddings) || !isCacheable(payload)) return false;
 
   let embedding;
@@ -125,7 +129,7 @@ async function store(payload, entry, { ttlSeconds = DEFAULT_TTL_SECONDS, embeddi
     return false;
   }
 
-  const key = listKey(payload.model);
+  const key = listKey(scope, payload.model);
   try {
     await redis.client.lPush(key, JSON.stringify({ embedding, entry, storedAt: Date.now() }));
     await redis.client.lTrim(key, 0, MAX_CANDIDATES_PER_MODEL - 1);
@@ -148,6 +152,7 @@ module.exports = {
   isCacheable,
   findMatch,
   store,
+  listKey,
   cosineSimilarity,
   extractPromptText,
   DEFAULT_THRESHOLD

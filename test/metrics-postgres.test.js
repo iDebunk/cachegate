@@ -44,7 +44,7 @@ before(async () => {
   try {
     // Prove connectivity up front with a clear failure message, rather
     // than 20 individual tests each failing with their own ECONNREFUSED.
-    await metrics.readRecent(1);
+    await metrics.readRecent(null, 1);
   } catch (err) {
     pgAvailable = false;
     console.warn(`⚠️ Skipping metrics-postgres.test.js - no local Postgres reachable at ${TEST_DATABASE_URL} (${err.message})`);
@@ -74,10 +74,10 @@ test('usingPostgres() is true once MEMOCODE_ROUTER_DATABASE_URL is set', () => {
 
 test('record() + readRecent(): a real INSERT round-trips back out with the same fields', async () => {
   if (!pgAvailable) return;
-  metrics.record({ provider: 'openai', model: 'gpt-4o-mini', latency_ms: 120, cost_usd: 0.001, cache_hit: false });
+  metrics.record(null, { provider: 'openai', model: 'gpt-4o-mini', latency_ms: 120, cost_usd: 0.001, cache_hit: false });
   await flush();
 
-  const rows = await metrics.readRecent();
+  const rows = await metrics.readRecent(null);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].provider, 'openai');
   assert.equal(rows[0].model, 'gpt-4o-mini');
@@ -88,26 +88,26 @@ test('record() + readRecent(): a real INSERT round-trips back out with the same 
 
 test('record() persists error + error_type together, exactly like the file backend', async () => {
   if (!pgAvailable) return;
-  metrics.record({
+  metrics.record(null, {
     provider: 'anthropic',
     error: '401 {"type":"error","error":{"type":"authentication_error"}}',
     error_type: 'authentication_error'
   });
   await flush();
 
-  const rows = await metrics.readRecent();
+  const rows = await metrics.readRecent(null);
   assert.equal(rows[0].error_type, 'authentication_error');
   assert.ok(rows[0].error.includes('authentication_error'));
 });
 
 test('providerStats(): error rate, avg latency, and lastErrorType all compute correctly from real rows', async () => {
   if (!pgAvailable) return;
-  metrics.record({ provider: 'openai', latency_ms: 100 });
-  metrics.record({ provider: 'openai', latency_ms: 200 });
-  metrics.record({ provider: 'openai', error: '429 {"error":{"type":"rate_limit_error"}}', error_type: 'rate_limit_error' });
+  metrics.record(null, { provider: 'openai', latency_ms: 100 });
+  metrics.record(null, { provider: 'openai', latency_ms: 200 });
+  metrics.record(null, { provider: 'openai', error: '429 {"error":{"type":"rate_limit_error"}}', error_type: 'rate_limit_error' });
   await flush();
 
-  const stats = await metrics.providerStats();
+  const stats = await metrics.providerStats(null);
   assert.equal(stats.openai.sampleSize, 3);
   assert.equal(stats.openai.errorRate, 1 / 3);
   assert.equal(stats.openai.avgLatencyMs, 150);
@@ -116,12 +116,12 @@ test('providerStats(): error rate, avg latency, and lastErrorType all compute co
 
 test('rangeSummary(): cost, cache-hit breakdown, and by_provider all agree with what was actually inserted', async () => {
   if (!pgAvailable) return;
-  metrics.record({ provider: 'openai', cost_usd: 0.001, cache_hit: false });
-  metrics.record({ provider: 'openai', cost_usd: 0, cache_hit: true, cache_type: 'exact' });
-  metrics.record({ provider: 'anthropic', error: '500 boom', error_type: 'unknown' });
+  metrics.record(null, { provider: 'openai', cost_usd: 0.001, cache_hit: false });
+  metrics.record(null, { provider: 'openai', cost_usd: 0, cache_hit: true, cache_type: 'exact' });
+  metrics.record(null, { provider: 'anthropic', error: '500 boom', error_type: 'unknown' });
   await flush();
 
-  const summary = await metrics.rangeSummary(14);
+  const summary = await metrics.rangeSummary(null, 14);
   assert.equal(summary.sample_size, 3);
   assert.equal(summary.total_cost_usd, 0.001);
   assert.equal(summary.cache_hit_rate.exact, 1 / 3);
@@ -143,10 +143,10 @@ test('rangeSummary(): a row older than the requested window is excluded', async 
   await pool.query(`INSERT INTO router_metrics (ts, provider, cost_usd) VALUES (now() - interval '30 days', 'openai', 0.05)`);
   await pool.end();
 
-  metrics.record({ provider: 'openai', cost_usd: 0.001 }); // today, should count
+  metrics.record(null, { provider: 'openai', cost_usd: 0.001 }); // today, should count
   await flush();
 
-  const summary = await metrics.rangeSummary(14); // 30-day-old row is outside this window
+  const summary = await metrics.rangeSummary(null, 14); // 30-day-old row is outside this window
   assert.equal(summary.sample_size, 1);
   assert.equal(summary.total_cost_usd, 0.001);
 });
@@ -163,13 +163,13 @@ test('pruneOlderThan(): deletes only rows past the cutoff, returns their ids, le
   await pool.query(`INSERT INTO router_metrics (ts, provider) VALUES (now() - interval '100 days', 'openai')`);
   await pool.end();
 
-  metrics.record({ provider: 'anthropic' }); // fresh, should survive
+  metrics.record(null, { provider: 'anthropic' }); // fresh, should survive
   await flush();
 
   const deleted = await metrics.pruneOlderThan(30);
   assert.equal(deleted.length, 1);
 
-  const remaining = await metrics.readRecent();
+  const remaining = await metrics.readRecent(null);
   assert.equal(remaining.length, 1);
   assert.equal(remaining[0].provider, 'anthropic');
 });
@@ -180,4 +180,64 @@ test('classifyErrorType() is the exact same function regardless of storage backe
     metrics.classifyErrorType('401 {"error":{"type":"authentication_error"}}'),
     'authentication_error'
   );
+});
+
+// Seams work (roadmap: engine/cloud "wrap it, don't fork it"). The
+// Postgres path is where the trap DeepSeek's cloud-side review flagged
+// (E, roadmap doc) is most real: `scope` is a NULLABLE column, added via
+// ALTER TABLE ... ADD COLUMN IF NOT EXISTS (ensureSchema's own comment),
+// not a fresh CREATE with a required column - and a naive
+// `WHERE scope = $1` for the null case would silently make global reads
+// return nothing once any scoped row exists, instead of everything.
+test('scope isolates one tenant\'s rows from another\'s, over a real Postgres round-trip', async () => {
+  if (!pgAvailable) return;
+  metrics.record('tenant-a', { provider: 'openai', latency_ms: 10 });
+  metrics.record('tenant-b', { provider: 'openai', latency_ms: 20 });
+  await flush();
+
+  const tenantA = await metrics.readRecent('tenant-a');
+  assert.equal(tenantA.length, 1);
+  assert.equal(tenantA[0].scope, 'tenant-a');
+  assert.equal(tenantA[0].latency_ms, 10);
+
+  const tenantB = await metrics.readRecent('tenant-b');
+  assert.equal(tenantB.length, 1);
+  assert.equal(tenantB[0].scope, 'tenant-b');
+});
+
+test('the global reader (scope null) sees every row over Postgres too, not just unscoped ones', async () => {
+  if (!pgAvailable) return;
+  metrics.record(null, { provider: 'openai', latency_ms: 1 });
+  metrics.record('tenant-a', { provider: 'openai', latency_ms: 2 });
+  metrics.record('tenant-b', { provider: 'openai', latency_ms: 3 });
+  await flush();
+
+  const all = await metrics.readRecent(null);
+  assert.equal(all.length, 3, 'global mode must read every row regardless of scope, not only unscoped ones');
+
+  const summary = await metrics.rangeSummary(null, 14);
+  assert.equal(summary.sample_size, 3);
+});
+
+test('an existing table (created before scope existed) gets the column added, not recreated - existing rows read back as unscoped', async () => {
+  if (!pgAvailable) return;
+  const { Pool } = require('pg');
+  const pool = new Pool({ connectionString: TEST_DATABASE_URL });
+  // Exactly the pre-seams schema, no `scope` column at all - simulates a
+  // live deployment upgrading into this change, not a fresh install.
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS router_metrics (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+       provider TEXT, model TEXT, requested_model TEXT, cache_hit BOOLEAN, cache_type TEXT,
+       latency_ms INTEGER, cost_usd DOUBLE PRECISION, error TEXT, error_type TEXT)`
+  );
+  await pool.query(`INSERT INTO router_metrics (provider, latency_ms) VALUES ('openai', 42)`);
+  await pool.end();
+
+  // The next call re-runs ensureSchema()'s ALTER TABLE ... ADD COLUMN IF
+  // NOT EXISTS - this must not error against the already-existing table,
+  // and the pre-existing row must come back readable, with no scope.
+  const rows = await metrics.readRecent(null);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].provider, 'openai');
+  assert.equal(rows[0].scope, undefined);
 });

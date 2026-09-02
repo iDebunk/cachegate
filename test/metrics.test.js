@@ -17,16 +17,16 @@ async function flush() {
 
 test('readRecent returns [] when no log file exists yet', async () => {
   const metrics = freshMetrics();
-  const rows = await metrics.readRecent();
+  const rows = await metrics.readRecent(null);
   assert.deepEqual(rows, []);
 });
 
 test('record() writes a line that readRecent() can read back, with a timestamp added', async () => {
   const metrics = freshMetrics();
-  metrics.record({ provider: 'openai', latency_ms: 120, cost_usd: 0.001 });
+  metrics.record(null, { provider: 'openai', latency_ms: 120, cost_usd: 0.001 });
   await flush();
 
-  const rows = await metrics.readRecent();
+  const rows = await metrics.readRecent(null);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].provider, 'openai');
   assert.ok(rows[0].timestamp, 'expected record() to stamp a timestamp');
@@ -34,13 +34,13 @@ test('record() writes a line that readRecent() can read back, with a timestamp a
 
 test('a malformed line in the log is skipped, not fatal', async () => {
   const metrics = freshMetrics();
-  metrics.record({ provider: 'openai', latency_ms: 10 });
+  metrics.record(null, { provider: 'openai', latency_ms: 10 });
   await flush();
   fs.appendFileSync(metrics.currentLogPath(), 'not valid json\n');
-  metrics.record({ provider: 'anthropic', latency_ms: 20 });
+  metrics.record(null, { provider: 'anthropic', latency_ms: 20 });
   await flush();
 
-  const rows = await metrics.readRecent();
+  const rows = await metrics.readRecent(null);
   assert.equal(rows.length, 2);
 });
 
@@ -49,7 +49,7 @@ test('currentLogPath() names a per-UTC-day file, and record() actually writes th
   const today = new Date().toISOString().slice(0, 10);
   assert.match(metrics.currentLogPath(), new RegExp(`metrics-${today}\\.jsonl$`));
 
-  metrics.record({ provider: 'openai' });
+  metrics.record(null, { provider: 'openai' });
   await flush();
   assert.ok(fs.existsSync(metrics.currentLogPath()), "record() should write to today's rotated file");
 });
@@ -75,7 +75,7 @@ test('readRecent() aggregates across multiple real day-files, newest data includ
     JSON.stringify({ timestamp: '2026-08-02T00:00:00.000Z', provider: 'openai', tag: 'newer' }) + '\n'
   );
 
-  const rows = await metrics.readRecent(10);
+  const rows = await metrics.readRecent(null, 10);
   assert.equal(rows.length, 2);
   assert.deepEqual(rows.map((r) => r.tag), ['old', 'newer']); // chronological order preserved
 });
@@ -91,7 +91,7 @@ test('readRecent(limit) stops opening older files once enough rows are collected
     Array.from({ length: 5 }, (_, i) => JSON.stringify({ timestamp: '2026-08-02T00:00:00.000Z', tag: `row-${i}` })).join('\n') + '\n'
   );
 
-  const rows = await metrics.readRecent(5);
+  const rows = await metrics.readRecent(null, 5);
   assert.equal(rows.length, 5);
   assert.ok(rows.every((r) => r.tag.startsWith('row-')), 'the older file should not have been needed to satisfy limit:5');
 });
@@ -101,7 +101,7 @@ test('pruneOlderThan() deletes only day-files strictly older than the cutoff, an
   const oldPath = path.join(metrics.DATA_DIR, 'metrics-2026-01-01.jsonl');
   const recentPath = metrics.currentLogPath();
   fs.writeFileSync(oldPath, '{}\n');
-  metrics.record({ provider: 'openai' });
+  metrics.record(null, { provider: 'openai' });
   await flush();
 
   const deleted = await metrics.pruneOlderThan(30);
@@ -112,12 +112,12 @@ test('pruneOlderThan() deletes only day-files strictly older than the cutoff, an
 
 test('providerStats() computes error rate and average latency per provider', async () => {
   const metrics = freshMetrics();
-  metrics.record({ provider: 'openai', latency_ms: 100 });
-  metrics.record({ provider: 'openai', latency_ms: 200 });
-  metrics.record({ provider: 'openai', error: 'boom' });
+  metrics.record(null, { provider: 'openai', latency_ms: 100 });
+  metrics.record(null, { provider: 'openai', latency_ms: 200 });
+  metrics.record(null, { provider: 'openai', error: 'boom' });
   await flush();
 
-  const stats = await metrics.providerStats();
+  const stats = await metrics.providerStats(null);
   assert.equal(stats.openai.sampleSize, 3);
   assert.equal(stats.openai.errorRate, 1 / 3);
   assert.equal(stats.openai.avgLatencyMs, 150); // average of the two non-error latencies
@@ -125,11 +125,11 @@ test('providerStats() computes error rate and average latency per provider', asy
 
 test('providerStats() only considers the most recent windowSize entries', async () => {
   const metrics = freshMetrics();
-  for (let i = 0; i < 5; i++) metrics.record({ provider: 'openai', error: 'boom' });
-  for (let i = 0; i < 5; i++) metrics.record({ provider: 'openai', latency_ms: 50 });
+  for (let i = 0; i < 5; i++) metrics.record(null, { provider: 'openai', error: 'boom' });
+  for (let i = 0; i < 5; i++) metrics.record(null, { provider: 'openai', latency_ms: 50 });
   await flush();
 
-  const stats = await metrics.providerStats(5); // window covers only the second batch
+  const stats = await metrics.providerStats(null, 5); // window covers only the second batch
   assert.equal(stats.openai.errorRate, 0);
   assert.equal(stats.openai.avgLatencyMs, 50);
 });
@@ -168,20 +168,20 @@ test('classifyErrorType() never throws on an empty/undefined message', () => {
 
 test('providerStats() reports the MOST RECENT error\'s classified type, not an earlier one still in the window', async () => {
   const metrics = freshMetrics();
-  metrics.record({
+  metrics.record(null, {
     provider: 'anthropic',
     error: '429 {"type":"error","error":{"type":"rate_limit_error"}}',
     error_type: 'rate_limit_error'
   });
-  metrics.record({ provider: 'anthropic', latency_ms: 500 }); // recovered in between
-  metrics.record({
+  metrics.record(null, { provider: 'anthropic', latency_ms: 500 }); // recovered in between
+  metrics.record(null, {
     provider: 'anthropic',
     error: '401 {"type":"error","error":{"type":"authentication_error"}}',
     error_type: 'authentication_error'
   });
   await flush();
 
-  const stats = await metrics.providerStats();
+  const stats = await metrics.providerStats(null);
   assert.equal(stats.anthropic.lastErrorType, 'authentication_error');
   assert.ok(stats.anthropic.lastErrorAt, 'expected a timestamp on the last error');
 });
@@ -190,19 +190,19 @@ test('providerStats() classifies on the fly for an older record written before e
   const metrics = freshMetrics();
   // No error_type field at all - simulates a log line from before this
   // feature existed, still stored on disk after an upgrade.
-  metrics.record({ provider: 'openai', error: '401 {"error":{"type":"authentication_error"}}' });
+  metrics.record(null, { provider: 'openai', error: '401 {"error":{"type":"authentication_error"}}' });
   await flush();
 
-  const stats = await metrics.providerStats();
+  const stats = await metrics.providerStats(null);
   assert.equal(stats.openai.lastErrorType, 'authentication_error');
 });
 
 test('providerStats() reports lastErrorType as null for a provider with no errors at all', async () => {
   const metrics = freshMetrics();
-  metrics.record({ provider: 'openai', latency_ms: 100 });
+  metrics.record(null, { provider: 'openai', latency_ms: 100 });
   await flush();
 
-  const stats = await metrics.providerStats();
+  const stats = await metrics.providerStats(null);
   assert.equal(stats.openai.lastErrorType, null);
   assert.equal(stats.openai.lastErrorAt, null);
 });
@@ -228,7 +228,7 @@ test('rangeSummary() buckets by calendar day and excludes rows outside the windo
   appendRaw(metrics, { timestamp: isoDaysAgo(1), provider: 'anthropic', cost_usd: 0.05, cache_hit: true, cache_type: 'semantic' });
   appendRaw(metrics, { timestamp: isoDaysAgo(30), provider: 'anthropic', cost_usd: 99, cache_hit: false }); // outside a 14-day window
 
-  const summary = await metrics.rangeSummary(14);
+  const summary = await metrics.rangeSummary(null, 14);
   assert.equal(summary.sample_size, 3);
   assert.equal(summary.total_cost_usd, 0.08);
   assert.equal(summary.daily.length, 2); // two distinct calendar days, the 30-day-old row excluded
@@ -240,13 +240,13 @@ test('rangeSummary() buckets by calendar day and excludes rows outside the windo
 
 test('rangeSummary() reports exact/semantic/combined hit rate and error rate separately', async () => {
   const metrics = freshMetrics();
-  metrics.record({ provider: 'openai', cost_usd: 0.01, cache_hit: false });
-  metrics.record({ provider: 'openai', cost_usd: 0, cache_hit: true, cache_type: 'exact' });
-  metrics.record({ provider: 'openai', cost_usd: 0, cache_hit: true, cache_type: 'semantic' });
-  metrics.record({ provider: 'openai', error: 'boom' });
+  metrics.record(null, { provider: 'openai', cost_usd: 0.01, cache_hit: false });
+  metrics.record(null, { provider: 'openai', cost_usd: 0, cache_hit: true, cache_type: 'exact' });
+  metrics.record(null, { provider: 'openai', cost_usd: 0, cache_hit: true, cache_type: 'semantic' });
+  metrics.record(null, { provider: 'openai', error: 'boom' });
   await flush();
 
-  const summary = await metrics.rangeSummary(14);
+  const summary = await metrics.rangeSummary(null, 14);
   assert.equal(summary.sample_size, 4);
   assert.equal(summary.cache_hit_rate.exact, 0.25);
   assert.equal(summary.cache_hit_rate.semantic, 0.25);
@@ -256,13 +256,13 @@ test('rangeSummary() reports exact/semantic/combined hit rate and error rate sep
 
 test('rangeSummary() computes per-provider cost, requests, error rate and avg latency', async () => {
   const metrics = freshMetrics();
-  metrics.record({ provider: 'openai', cost_usd: 0.01, latency_ms: 100 });
-  metrics.record({ provider: 'openai', cost_usd: 0.02, latency_ms: 300 });
-  metrics.record({ provider: 'openai', error: 'boom' });
-  metrics.record({ provider: 'anthropic', cost_usd: 0.5, latency_ms: 200 });
+  metrics.record(null, { provider: 'openai', cost_usd: 0.01, latency_ms: 100 });
+  metrics.record(null, { provider: 'openai', cost_usd: 0.02, latency_ms: 300 });
+  metrics.record(null, { provider: 'openai', error: 'boom' });
+  metrics.record(null, { provider: 'anthropic', cost_usd: 0.5, latency_ms: 200 });
   await flush();
 
-  const summary = await metrics.rangeSummary(14);
+  const summary = await metrics.rangeSummary(null, 14);
   assert.equal(summary.by_provider.openai.requests, 3);
   assert.equal(summary.by_provider.openai.cost_usd, 0.03);
   assert.equal(summary.by_provider.openai.errorRate, 1 / 3);
@@ -273,10 +273,57 @@ test('rangeSummary() computes per-provider cost, requests, error rate and avg la
 
 test('rangeSummary() on an empty log returns zeroed rates, not NaN or a crash', async () => {
   const metrics = freshMetrics();
-  const summary = await metrics.rangeSummary(14);
+  const summary = await metrics.rangeSummary(null, 14);
   assert.equal(summary.sample_size, 0);
   assert.equal(summary.cache_hit_rate.combined, 0);
   assert.equal(summary.error_rate, 0);
   assert.deepEqual(summary.daily, []);
   assert.deepEqual(summary.by_provider, {});
+});
+
+// Seams work (roadmap: engine/cloud "wrap it, don't fork it") - the two
+// halves of the scope contract, regression-tested rather than just
+// documented: a real scope isolates readers from every OTHER scope's
+// rows, and the unscoped/global reader (scope === null/undefined) keeps
+// seeing every row regardless of what any scoped caller ever wrote
+// alongside it - the exact trap DeepSeek's cloud-side review flagged
+// (E, roadmap doc): a naive "WHERE scope = null" filter would make
+// global mode read NOTHING once any scoped row exists, not everything.
+test('readRecent(scope) isolates one scope from another\'s recorded rows', async () => {
+  const metrics = freshMetrics();
+  metrics.record('tenant-a', { provider: 'openai', latency_ms: 1 });
+  metrics.record('tenant-b', { provider: 'openai', latency_ms: 2 });
+  await flush();
+
+  const tenantA = await metrics.readRecent('tenant-a');
+  const tenantB = await metrics.readRecent('tenant-b');
+  assert.equal(tenantA.length, 1);
+  assert.equal(tenantA[0].scope, 'tenant-a');
+  assert.equal(tenantB.length, 1);
+  assert.equal(tenantB[0].scope, 'tenant-b');
+});
+
+test('readRecent(null) - the global reader - sees every row, scoped and unscoped alike, not just rows with no scope', async () => {
+  const metrics = freshMetrics();
+  metrics.record(null, { provider: 'openai', latency_ms: 1 });
+  metrics.record('tenant-a', { provider: 'openai', latency_ms: 2 });
+  metrics.record('tenant-b', { provider: 'openai', latency_ms: 3 });
+  await flush();
+
+  const all = await metrics.readRecent(null);
+  assert.equal(all.length, 3, 'global mode must read every row regardless of scope, not only unscoped ones');
+});
+
+test('providerStats(scope) and rangeSummary(scope) both respect the same isolation', async () => {
+  const metrics = freshMetrics();
+  metrics.record('tenant-a', { provider: 'openai', latency_ms: 100, cost_usd: 0.01 });
+  metrics.record('tenant-b', { provider: 'openai', latency_ms: 900, cost_usd: 0.09 });
+  await flush();
+
+  const statsA = await metrics.providerStats('tenant-a');
+  assert.equal(statsA.openai.avgLatencyMs, 100);
+
+  const summaryB = await metrics.rangeSummary('tenant-b', 14);
+  assert.equal(summaryB.by_provider.openai.cost_usd, 0.09);
+  assert.equal(summaryB.sample_size, 1);
 });

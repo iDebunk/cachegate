@@ -75,6 +75,18 @@ function getPool() {
 // Idempotent - safe to call on every getPool() use (CREATE TABLE/INDEX
 // IF NOT EXISTS), so a fresh deployment self-provisions its own schema
 // on first write with no separate migration step to remember to run.
+// `scope` (seams work, roadmap: engine/cloud "wrap it, don't fork it"):
+// NULLABLE, not NOT NULL - deliberately different from how a fork
+// starting fresh (CREATE TABLE with a required column) would do it.
+// This module has live deployments already running against an existing
+// table (MemoCode's own render wiring) where CREATE TABLE IF NOT EXISTS
+// is a no-op on an already-created table - ADD COLUMN IF NOT EXISTS is
+// what actually reaches an existing table's schema (same ALTER pattern
+// the sibling backend's db.mjs already uses for exactly this reason).
+// Existing rows get scope = NULL, which is exactly right: they were
+// recorded before scope existed, under the one global/unscoped history,
+// and null-scope reads (see rowFilterSql below) return precisely that
+// history unfiltered.
 let schemaReady = null;
 async function ensureSchema() {
   if (!schemaReady) {
@@ -92,8 +104,10 @@ async function ensureSchema() {
         error TEXT,
         error_type TEXT
       );
+      ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS scope TEXT;
       CREATE INDEX IF NOT EXISTS router_metrics_ts_idx ON router_metrics (ts DESC);
       CREATE INDEX IF NOT EXISTS router_metrics_provider_ts_idx ON router_metrics (provider, ts DESC);
+      CREATE INDEX IF NOT EXISTS router_metrics_scope_ts_idx ON router_metrics (scope, ts DESC);
     `);
   }
   return schemaReady;
@@ -108,6 +122,7 @@ async function ensureSchema() {
 function rowFromPg(dbRow) {
   return {
     timestamp: dbRow.ts.toISOString(),
+    scope: dbRow.scope === null ? undefined : dbRow.scope,
     provider: dbRow.provider || undefined,
     model: dbRow.model || undefined,
     requested_model: dbRow.requested_model || undefined,
@@ -120,14 +135,15 @@ function rowFromPg(dbRow) {
   };
 }
 
-async function recordToPostgres(entry) {
+async function recordToPostgres(scope, entry) {
   try {
     await ensureSchema();
     await getPool().query(
       `INSERT INTO router_metrics
-         (provider, model, requested_model, cache_hit, cache_type, latency_ms, cost_usd, error, error_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+         (scope, provider, model, requested_model, cache_hit, cache_type, latency_ms, cost_usd, error, error_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
+        scope != null ? String(scope) : null,
         entry.provider ?? null,
         entry.model ?? null,
         entry.requested_model ?? null,
@@ -146,21 +162,38 @@ async function recordToPostgres(entry) {
   }
 }
 
-async function readRecentFromPostgres(limit) {
+// scope === null/undefined means "global" - EVERY row, not rows whose
+// own scope happens to be NULL. That's the seams contract this whole
+// module holds to (see readRecent/providerStats/rangeSummary below): a
+// deployment that never adopts scoping keeps reading its entire history
+// exactly as it always has, whatever a future scoped caller happens to
+// write alongside it. `scope = $1` is used only when a real scope value
+// was actually asked for.
+async function readRecentFromPostgres(scope, limit) {
   await ensureSchema();
-  const result = await getPool().query(
-    `SELECT * FROM router_metrics ORDER BY ts DESC LIMIT $1`,
-    [limit]
-  );
+  const result = scope != null
+    ? await getPool().query(
+        `SELECT * FROM router_metrics WHERE scope = $1 ORDER BY ts DESC LIMIT $2`,
+        [String(scope), limit]
+      )
+    : await getPool().query(
+        `SELECT * FROM router_metrics ORDER BY ts DESC LIMIT $1`,
+        [limit]
+      );
   return result.rows.reverse().map(rowFromPg); // oldest-first, matching readRecent()'s own file-backed order
 }
 
-async function rowsSinceFromPostgres(cutoffMs) {
+async function rowsSinceFromPostgres(scope, cutoffMs) {
   await ensureSchema();
-  const result = await getPool().query(
-    `SELECT * FROM router_metrics WHERE ts >= $1 ORDER BY ts ASC`,
-    [new Date(cutoffMs)]
-  );
+  const result = scope != null
+    ? await getPool().query(
+        `SELECT * FROM router_metrics WHERE scope = $1 AND ts >= $2 ORDER BY ts ASC`,
+        [String(scope), new Date(cutoffMs)]
+      )
+    : await getPool().query(
+        `SELECT * FROM router_metrics WHERE ts >= $1 ORDER BY ts ASC`,
+        [new Date(cutoffMs)]
+      );
   return result.rows.map(rowFromPg);
 }
 
@@ -308,18 +341,36 @@ function ensureWriteStream() {
  * Record one completed request, appended to TODAY's file. Fire-and-
  * forget by design - a metrics write must never be the reason a real
  * request fails or slows down.
+ *
+ * `scope` (seams work): an opaque isolation key, same contract as
+ * cache.js's - null/undefined (every call site in this codebase today)
+ * omits the field entirely, so an unscoped deployment's JSONL rows are
+ * byte-identical to before this parameter existed.
  */
-function record(entry) {
+function record(scope, entry) {
   if (usingPostgres()) {
-    recordToPostgres(entry); // fire-and-forget - see its own comment
+    recordToPostgres(scope, entry); // fire-and-forget - see its own comment
     return;
   }
   try {
-    const line = JSON.stringify({ timestamp: new Date().toISOString(), ...entry }) + '\n';
+    const line = JSON.stringify({
+      timestamp: new Date().toISOString(),
+      ...(scope != null ? { scope } : {}),
+      ...entry
+    }) + '\n';
     ensureWriteStream().write(line);
   } catch (err) {
     console.warn('⚠️ Failed to record metric:', err.message);
   }
+}
+
+// scope === null/undefined means "every row", not "rows whose own
+// scope field happens to be absent" - see readRecentFromPostgres's own
+// comment for why that distinction matters (it's what keeps an
+// unscoped deployment's history complete once ANY caller starts
+// passing a real scope).
+function matchesScope(row, scope) {
+  return scope == null || row.scope === scope;
 }
 
 /**
@@ -328,13 +379,14 @@ function record(entry) {
  * how many DAYS of data are needed to satisfy `limit`, not by the
  * service's entire lifetime.
  */
-async function readRecent(limit = 500) {
-  if (usingPostgres()) return readRecentFromPostgres(limit);
+async function readRecent(scope, limit = 500) {
+  if (usingPostgres()) return readRecentFromPostgres(scope, limit);
   const files = await listLogFiles();
   const collected = [];
   for (let i = files.length - 1; i >= 0 && collected.length < limit; i--) {
-    const rows = await readFileRows(files[i].path);
+    const rows = (await readFileRows(files[i].path)).filter((r) => matchesScope(r, scope));
     collected.unshift(...rows);
+    if (collected.length > limit) collected.splice(0, collected.length - limit);
   }
   return collected.slice(-limit);
 }
@@ -346,8 +398,8 @@ async function readRecent(limit = 500) {
  * currently slow or failing shouldn't be picked just because its list
  * price is lowest.
  */
-async function providerStats(windowSize = 50) {
-  const rows = await readRecent(2000);
+async function providerStats(scope, windowSize = 50) {
+  const rows = await readRecent(scope, 2000);
   const byProvider = {};
 
   for (const row of rows) {
@@ -409,7 +461,7 @@ async function providerStats(windowSize = 50) {
  * underlying log, two different questions - not accidentally
  * duplicated logic.
  */
-async function rangeSummary(days = 14) {
+async function rangeSummary(scope, days = 14) {
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
 
   // Row-fetching prelude only - everything from here down (the actual
@@ -418,7 +470,7 @@ async function rangeSummary(days = 14) {
   // by both.
   let rows;
   if (usingPostgres()) {
-    rows = await rowsSinceFromPostgres(cutoff); // already filtered server-side
+    rows = await rowsSinceFromPostgres(scope, cutoff); // already filtered server-side
   } else {
     const files = await listLogFiles();
     const relevantFiles = files.filter((f) => {
@@ -429,7 +481,7 @@ async function rangeSummary(days = 14) {
     });
     rows = [];
     for (const f of relevantFiles) {
-      rows = rows.concat(await readFileRows(f.path));
+      rows = rows.concat((await readFileRows(f.path)).filter((r) => matchesScope(r, scope)));
     }
   }
   const inRange = rows.filter((r) => r.timestamp && Date.parse(r.timestamp) >= cutoff);
@@ -551,6 +603,7 @@ module.exports = {
   listLogFiles,
   classifyErrorType,
   usingPostgres,
+  matchesScope,
   closePostgresPoolForTests,
   DATA_DIR
 };

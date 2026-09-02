@@ -88,15 +88,15 @@ test('isEnabled() is false when embeddings are disabled, even with Redis connect
 
 test('the exact-match cache (cache.js) still works over the same shared connection', async () => {
   const payload = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'shared connection check' }] };
-  assert.equal(await cache.get(payload), null);
-  await cache.set(payload, { provider: 'openai', model: 'gpt-4o-mini', content: 'ok' });
-  const hit = await cache.get(payload);
+  assert.equal(await cache.get(null, payload), null);
+  await cache.set(null, payload, { provider: 'openai', model: 'gpt-4o-mini', content: 'ok' });
+  const hit = await cache.get(null, payload);
   assert.equal(hit.content, 'ok');
 });
 
 test('findMatch() returns null when nothing has been stored yet', async () => {
   const payload = { model: 'router-test-model-empty', messages: [{ role: 'user', content: 'is anyone there' }] };
-  const result = await semanticCache.findMatch(payload, { embeddings: fakeEmbeddings });
+  const result = await semanticCache.findMatch(null, payload, { embeddings: fakeEmbeddings });
   assert.equal(result, null);
 });
 
@@ -105,10 +105,10 @@ test('store() then findMatch() with the identical prompt finds a match (similari
   const payload = { model, messages: [{ role: 'user', content: 'how do I reset my password' }] };
   const entry = { provider: 'openai', model, content: 'Go to Settings > Security > Reset password.' };
 
-  const stored = await semanticCache.store(payload, entry, { embeddings: fakeEmbeddings });
+  const stored = await semanticCache.store(null, payload, entry, { embeddings: fakeEmbeddings });
   assert.equal(stored, true);
 
-  const match = await semanticCache.findMatch(payload, { embeddings: fakeEmbeddings });
+  const match = await semanticCache.findMatch(null, payload, { embeddings: fakeEmbeddings });
   assert.ok(match, 'expected a match for the identical prompt');
   assert.equal(match.entry.content, entry.content);
   assert.ok(match.similarity > 0.99, `expected near-1 similarity, got ${match.similarity}`);
@@ -117,10 +117,10 @@ test('store() then findMatch() with the identical prompt finds a match (similari
 test('findMatch() does not match an unrelated prompt under the same model', async () => {
   const model = 'router-test-model-unrelated';
   const stored = { model, messages: [{ role: 'user', content: 'how do I reset my password' }] };
-  await semanticCache.store(stored, { provider: 'openai', model, content: 'reset password steps' }, { embeddings: fakeEmbeddings });
+  await semanticCache.store(null, stored, { provider: 'openai', model, content: 'reset password steps' }, { embeddings: fakeEmbeddings });
 
   const unrelated = { model, messages: [{ role: 'user', content: 'what is the weather in Tokyo tomorrow' }] };
-  const match = await semanticCache.findMatch(unrelated, { embeddings: fakeEmbeddings, threshold: 0.93 });
+  const match = await semanticCache.findMatch(null, unrelated, { embeddings: fakeEmbeddings, threshold: 0.93 });
   assert.equal(match, null);
 });
 
@@ -131,11 +131,28 @@ test('findMatch()/store() skip tool-calling requests entirely (never cached, nev
     messages: [{ role: 'user', content: 'call the tool' }],
     tools: [{ type: 'function', function: { name: 'do_thing' } }]
   };
-  const stored = await semanticCache.store(payload, { provider: 'openai', model, content: 'x' }, { embeddings: fakeEmbeddings });
+  const stored = await semanticCache.store(null, payload, { provider: 'openai', model, content: 'x' }, { embeddings: fakeEmbeddings });
   assert.equal(stored, false);
 
-  const match = await semanticCache.findMatch(payload, { embeddings: fakeEmbeddings });
+  const match = await semanticCache.findMatch(null, payload, { embeddings: fakeEmbeddings });
   assert.equal(match, null);
+});
+
+test('scope isolates semantic lists: two scopes never see each other\'s stored entries', async () => {
+  const model = 'router-test-model-scoped';
+  const payload = { model, messages: [{ role: 'user', content: 'how do I reset my password' }] };
+  const entry = { provider: 'openai', model, content: 'tenant-a answer' };
+
+  await semanticCache.store('tenant-a', payload, entry, { embeddings: fakeEmbeddings });
+
+  const sameTenant = await semanticCache.findMatch('tenant-a', payload, { embeddings: fakeEmbeddings });
+  assert.ok(sameTenant, 'expected tenant-a to see its own stored entry');
+
+  const otherTenant = await semanticCache.findMatch('tenant-b', payload, { embeddings: fakeEmbeddings });
+  assert.equal(otherTenant, null, 'tenant-b must not see tenant-a\'s entry');
+
+  const global = await semanticCache.findMatch(null, payload, { embeddings: fakeEmbeddings });
+  assert.equal(global, null, 'the unscoped/global list must not see a scoped entry either');
 });
 
 test('per-model list is trimmed to SEMANTIC_CACHE_MAX_CANDIDATES', async () => {
@@ -147,6 +164,7 @@ test('per-model list is trimmed to SEMANTIC_CACHE_MAX_CANDIDATES', async () => {
   const model = 'router-test-model-trim';
   for (let i = 0; i < 5; i++) {
     await scopedSemanticCache.store(
+      null,
       { model, messages: [{ role: 'user', content: `distinct prompt number ${i}` }] },
       { provider: 'openai', model, content: `answer ${i}` },
       { embeddings: fakeEmbeddings }

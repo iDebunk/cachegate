@@ -65,9 +65,9 @@ test('pickCandidate skips a candidate whose recent error rate is too high, even 
   // Make openai (the cheaper candidate in router:fast-cheap) look
   // unhealthy: mostly errors in its recent history.
   for (let i = 0; i < 10; i++) {
-    metrics.record({ provider: 'openai', error: 'simulated failure' });
+    metrics.record(null, { provider: 'openai', error: 'simulated failure' });
   }
-  metrics.record({ provider: 'anthropic', latency_ms: 500 });
+  metrics.record(null, { provider: 'anthropic', latency_ms: 500 });
 
   // Metrics writes go through a stream; give it a tick to flush before
   // reading the file back.
@@ -84,14 +84,34 @@ test('pickCandidate still returns a candidate when every option is unhealthy', a
   const { metrics, router } = freshModules(logPath);
 
   for (let i = 0; i < 10; i++) {
-    metrics.record({ provider: 'openai', error: 'simulated failure' });
-    metrics.record({ provider: 'anthropic', error: 'simulated failure' });
+    metrics.record(null, { provider: 'openai', error: 'simulated failure' });
+    metrics.record(null, { provider: 'anthropic', error: 'simulated failure' });
   }
   await new Promise((resolve) => setTimeout(resolve, 50));
 
   const decision = await router.pickCandidate('router:fast-cheap');
   assert.ok(decision.provider);
   assert.equal(decision.reason.allUnhealthy, true);
+});
+
+// Reliability review (2026-09-02): a Postgres-backed metrics store going
+// down used to turn EVERY router:* request into an unhandled promise
+// rejection (Express 4 never routes those to the error middleware) - a
+// process-crash vector, not just a degraded response. A gateway's job
+// during a dependency blip is to keep serving; the per-candidate
+// failover at dispatch time still catches a genuinely-broken provider.
+test('pickCandidate degrades to cost-only ranking (not an error) when the metrics store is unreachable', async () => {
+  const { metrics, router } = freshModules(tempLogPath());
+  metrics.providerStats = () => Promise.reject(new Error('simulated Postgres outage'));
+
+  const decision = await router.pickCandidate('router:fast-cheap');
+  assert.ok(!decision.error);
+  // Same result a brand-new deployment with zero history already
+  // produces (every candidate healthy, cost-only ordering) - the outage
+  // is invisible to the caller, not silently wrong.
+  assert.equal(decision.provider, 'openai');
+  assert.equal(decision.model, 'gpt-4o-mini');
+  assert.equal(decision.reason.allUnhealthy, false);
 });
 
 test('pickCandidate reports which strategy it used', async () => {
@@ -111,8 +131,8 @@ test('ROUTER_STRATEGY=latency picks the fastest healthy candidate even when it c
 
   // gpt-4o-mini is the cheaper candidate in router:fast-cheap, but make
   // it noticeably slower than claude-haiku here.
-  for (let i = 0; i < 5; i++) metrics.record({ provider: 'openai', latency_ms: 2000 });
-  for (let i = 0; i < 5; i++) metrics.record({ provider: 'anthropic', latency_ms: 100 });
+  for (let i = 0; i < 5; i++) metrics.record(null, { provider: 'openai', latency_ms: 2000 });
+  for (let i = 0; i < 5; i++) metrics.record(null, { provider: 'anthropic', latency_ms: 100 });
   await flush();
 
   const decision = await router.pickCandidate('router:fast-cheap');
@@ -141,8 +161,8 @@ test('ROUTER_STRATEGY=latency-guarded-cost excludes a candidate far slower than 
   // openai/gpt-4o-mini is the cheaper candidate, but 3000ms is far more
   // than 3x (the default guard multiplier) slower than anthropic's
   // 100ms - it should get excluded by the guard despite being cheaper.
-  for (let i = 0; i < 5; i++) metrics.record({ provider: 'openai', latency_ms: 3000 });
-  for (let i = 0; i < 5; i++) metrics.record({ provider: 'anthropic', latency_ms: 100 });
+  for (let i = 0; i < 5; i++) metrics.record(null, { provider: 'openai', latency_ms: 3000 });
+  for (let i = 0; i < 5; i++) metrics.record(null, { provider: 'anthropic', latency_ms: 100 });
   await flush();
 
   const decision = await router.pickCandidate('router:fast-cheap');
@@ -161,8 +181,8 @@ test('ROUTER_STRATEGY=latency-guarded-cost keeps a candidate that is only modest
   // 150ms is only 1.5x anthropic's 100ms - comfortably inside the
   // default 3x guard multiplier, so openai stays in the pool and wins
   // on cost as usual.
-  for (let i = 0; i < 5; i++) metrics.record({ provider: 'openai', latency_ms: 150 });
-  for (let i = 0; i < 5; i++) metrics.record({ provider: 'anthropic', latency_ms: 100 });
+  for (let i = 0; i < 5; i++) metrics.record(null, { provider: 'openai', latency_ms: 150 });
+  for (let i = 0; i < 5; i++) metrics.record(null, { provider: 'anthropic', latency_ms: 100 });
   await flush();
 
   const decision = await router.pickCandidate('router:fast-cheap');

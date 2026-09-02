@@ -210,7 +210,7 @@ test('a streamed request that hits the exact cache replays the cached content as
   t.after(() => server.close());
 
   const payload = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'stream cache replay test' }] };
-  await cache.set(payload, {
+  await cache.set(null, payload, {
     provider: 'openai',
     model: 'gpt-4o-mini',
     content: 'Hello from cache',

@@ -25,7 +25,17 @@ async function embed(text) {
     throw new Error('OPENAI_API_KEY not configured - embeddings unavailable');
   }
   const model = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
-  const response = await getClient().embeddings.create({ model, input: text });
+  // A hard timeout per embedding call: these run on the hot request path
+  // (semanticCache.js's findMatch/store, one or two per miss), so a hung
+  // embedding provider must not be able to stall every chat request -
+  // including ones that never touch embeddings at all if the semantic
+  // cache is enabled. AbortSignal.timeout aborts the underlying fetch, and
+  // the thrown error is caught by semanticCache.js's own try/catch, which
+  // degrades to "skip semantic caching" rather than failing the request.
+  const response = await getClient().embeddings.create(
+    { model, input: text },
+    { signal: AbortSignal.timeout(Number(process.env.EMBEDDING_TIMEOUT_MS) || 5000) }
+  );
   return response.data[0].embedding;
 }
 

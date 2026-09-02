@@ -41,7 +41,13 @@
 #      target checkout (removes everything else from the target's
 #      working tree first, except its own .git/) - a file removed here
 #      also disappears there, never a manual, error-prone diff to keep
-#      in sync by hand.
+#      in sync by hand. EXCEPT the files named in this step's own
+#      NEVER_MIRROR list - ROADMAP.md and OPEN_SOURCE_ROADMAP.md are
+#      git-tracked right here but never copied: they're internal-only
+#      planning docs (this monorepo's own name, account/strategy
+#      discussion), and both already leaked into the public repo and the
+#      npm tarball once, precisely because this step used to copy every
+#      tracked file with no exceptions.
 #   4. Commits in the TARGET repo (one new commit, normal history).
 #      Does NOT push - pushing is a deliberate, separate, human/CI step.
 
@@ -131,13 +137,37 @@ echo "📦 Step 3/4: mirroring tracked files into $TARGET..."
 # EXACT mirror, not an accumulation of whatever used to be there.
 find "$TARGET" -mindepth 1 -maxdepth 1 -not -name ".git" -exec rm -rf {} +
 
+# Never mirrored, even though both are git-tracked right here: internal-
+# only planning docs that chronicle THIS team's own decision-making (this
+# private monorepo's own name, account/strategy discussion) - never meant
+# to leave it. These leaked into the public repo and the npm tarball once
+# already (cleaned up by hand there after the fact, 2026-09) because
+# nothing stopped step 3 below from copying them like any other tracked
+# file - this list is what stops that from silently happening again on
+# the next sync.
+NEVER_MIRROR=("ROADMAP.md" "OPEN_SOURCE_ROADMAP.md")
+is_never_mirrored() {
+  local candidate="$1"
+  for excluded in "${NEVER_MIRROR[@]}"; do
+    if [[ "$candidate" == "$excluded" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+copied=0
 while IFS= read -r -d '' file; do
+  if is_never_mirrored "$file"; then
+    continue
+  fi
   dest="$TARGET/$file"
   mkdir -p "$(dirname "$dest")"
   cp "$file" "$dest"
+  copied=$((copied + 1))
 done < <(git ls-files -z)
 
-echo "  ✅ Copied $(git ls-files | wc -l | tr -d ' ') tracked files."
+echo "  ✅ Copied $copied tracked files (${#NEVER_MIRROR[@]} internal-only doc(s) deliberately excluded: ${NEVER_MIRROR[*]})."
 
 echo "💾 Step 4/4: committing in the target repo (not pushing)..."
 SOURCE_SHA="$(git rev-parse --short HEAD)"
