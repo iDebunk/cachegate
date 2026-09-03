@@ -110,6 +110,28 @@ test('pruneOlderThan() deletes only day-files strictly older than the cutoff, an
   assert.equal(fs.existsSync(recentPath), true, "pruneOlderThan should never touch today's file");
 });
 
+test('pruneScopedOlderThan() is a documented no-op on the JSONL file backend (scopes share per-day files)', async () => {
+  const metrics = freshMetrics();
+  metrics.record('tenant-a', { provider: 'openai' });
+  await flush();
+
+  // The file backend cannot excise one scope without rewriting the
+  // shared append-only day files, so a scoped prune must delete nothing
+  // (and warn) rather than silently drop other tenants' rows.
+  const deleted = await metrics.pruneScopedOlderThan('tenant-a', 30);
+  assert.deepEqual(deleted, []);
+  // Nothing was deleted: the tenant-a row still reads back.
+  const rows = await metrics.readRecent('tenant-a');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].provider, 'openai');
+});
+
+test('pruneScopedOlderThan() rejects on a null/undefined scope (fail-closed, not a silent no-op)', async () => {
+  const metrics = freshMetrics();
+  await assert.rejects(metrics.pruneScopedOlderThan(null, 30), /non-null scope/);
+  await assert.rejects(metrics.pruneScopedOlderThan(undefined, 30), /non-null scope/);
+});
+
 test('providerStats() computes error rate and average latency per provider', async () => {
   const metrics = freshMetrics();
   metrics.record(null, { provider: 'openai', latency_ms: 100 });

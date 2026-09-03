@@ -4,6 +4,17 @@ All notable changes to `cachegate` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 uses [semantic versioning](https://semver.org/).
 
+## [1.3.0] - 2026-09-03
+
+### Added
+- `metrics.pruneScopedOlderThan(scope, days)` — scope-isolated cleanup:
+  deletes one scope's records older than `days` (Postgres backend),
+  leaving every other tenant's history untouched. This is the primitive
+  a per-tenant retention policy needs. Throws on a `null`/`undefined`
+  scope (fail-closed), and is a documented no-op on the JSONL file
+  backend (scopes share per-day append-only files). The global
+  `pruneOlderThan(days)` is unchanged.
+
 ## [1.2.0] - 2026-09-02
 
 ### Added
