@@ -206,6 +206,15 @@ async function pruneOlderThanPostgres(days) {
   return result.rows.map((r) => r.id);
 }
 
+async function pruneScopedOlderThanPostgres(scope, days) {
+  await ensureSchema();
+  const result = await getPool().query(
+    `DELETE FROM router_metrics WHERE scope = $1 AND ts < now() - ($2::double precision * interval '1 day') RETURNING id`,
+    [String(scope), days]
+  );
+  return result.rows.map((r) => r.id);
+}
+
 // Turns a raw provider error message into one of a handful of stable,
 // human-meaningful buckets - the difference between a dashboard that says
 // "openai: 100% error rate" (true, but not actionable without opening a
@@ -581,6 +590,44 @@ async function pruneOlderThan(days) {
   return deleted;
 }
 
+/**
+ * Scope-isolated cleanup (seams work): deletes only `scope`'s records
+ * older than `days`, leaving every other tenant's history untouched.
+ * This is the primitive a per-tenant retention policy needs - the DAYS
+ * live in the caller (a billing/tier decision, e.g. Free 7d / Starter
+ * 30d / Growth 90d), while the scope-filtered DELETE lives here, under
+ * the same `scope` contract as readRecent/providerStats/rangeSummary (a
+ * primitive; `scope = $1`). Postgres-only: the JSONL file backend keeps
+ * every scope in shared per-day append-only files, so excising one scope
+ * would mean rewriting those files mid-append - scoped prune is a
+ * multi-tenant (Postgres) concern, and on the file backend it is a
+ * documented no-op (warns, returns []). The global pruneOlderThan(days)
+ * above stays the unscoped, delete-everything form, for legacy/null-
+ * scope history and standalone single-tenant runs.
+ */
+async function pruneScopedOlderThan(scope, days) {
+  // Fail closed on a null/undefined scope: this function is the SCOPED
+  // form, and passing null (which readRecent/providerStats/rangeSummary
+  // treat as "global") would otherwise either silently delete nothing
+  // (Postgres: scope = 'null' matches no real tenant) or warn-and-no-op
+  // (file backend) - both silent, both wrong for a caller who expected a
+  // global prune. Delegating to pruneOlderThan(days) instead would be
+  // the OPPOSITE hazard (silently deleting every tenant's history), so
+  // the safe answer is a loud error pointing at the right function.
+  if (scope == null) {
+    throw new Error(
+      'pruneScopedOlderThan(scope, days) requires a non-null scope. ' +
+      'Use pruneOlderThan(days) to prune globally.'
+    );
+  }
+  if (usingPostgres()) return pruneScopedOlderThanPostgres(scope, days);
+  console.warn(
+    '⚠️ pruneScopedOlderThan() is Postgres-only: the JSONL file backend ' +
+    'cannot excise one scope from shared per-day files. Nothing deleted.'
+  );
+  return [];
+}
+
 // Test-only: closes the cached pool (if one was ever opened) so a test
 // run doesn't hang on an open connection, and so the NEXT test that
 // re-requires this module with a different DATABASE_URL gets a fresh
@@ -599,6 +646,7 @@ module.exports = {
   providerStats,
   rangeSummary,
   pruneOlderThan,
+  pruneScopedOlderThan,
   currentLogPath,
   listLogFiles,
   classifyErrorType,

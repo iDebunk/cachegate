@@ -174,6 +174,37 @@ test('pruneOlderThan(): deletes only rows past the cutoff, returns their ids, le
   assert.equal(remaining[0].provider, 'anthropic');
 });
 
+test('pruneScopedOlderThan(): deletes only that scope\'s rows past the cutoff, leaves other tenants and fresh rows alone', async () => {
+  if (!pgAvailable) return;
+  const { Pool } = require('pg');
+  const pool = new Pool({ connectionString: TEST_DATABASE_URL });
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS router_metrics (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+       scope TEXT, provider TEXT, model TEXT, requested_model TEXT, cache_hit BOOLEAN, cache_type TEXT,
+       latency_ms INTEGER, cost_usd DOUBLE PRECISION, error TEXT, error_type TEXT)`
+  );
+  // tenant-a old (should be pruned), tenant-b old (different scope, must
+  // survive) - then a fresh tenant-a row via record() (must survive).
+  await pool.query(`INSERT INTO router_metrics (ts, scope, provider) VALUES
+    (now() - interval '100 days', 'tenant-a', 'openai'),
+    (now() - interval '100 days', 'tenant-b', 'openai')`);
+  await pool.end();
+
+  metrics.record('tenant-a', { provider: 'anthropic' }); // fresh, should survive
+  await flush();
+
+  const deleted = await metrics.pruneScopedOlderThan('tenant-a', 30);
+  assert.equal(deleted.length, 1, 'only the old tenant-a row should be deleted');
+
+  const tenantA = await metrics.readRecent('tenant-a');
+  assert.equal(tenantA.length, 1);
+  assert.equal(tenantA[0].provider, 'anthropic');
+
+  const tenantB = await metrics.readRecent('tenant-b');
+  assert.equal(tenantB.length, 1, "tenant-b's history must be untouched");
+  assert.equal(tenantB[0].provider, 'openai');
+});
+
 test('classifyErrorType() is the exact same function regardless of storage backend (not duplicated/reimplemented)', () => {
   if (!pgAvailable) return;
   assert.equal(
