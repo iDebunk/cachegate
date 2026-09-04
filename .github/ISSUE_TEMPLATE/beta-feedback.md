@@ -27,6 +27,11 @@ labels: ["beta"]
 - **Browser:** <!-- e.g. Chrome 120, Firefox 121, Safari 17 -->
 - **OS:** <!-- e.g. macOS 14, Windows 11, Ubuntu 24.04 -->
 
+### Plan limits
+
+- Did you hit your plan's request limit? <!-- yes / no -->
+- If you had hit it, would you have paid to keep going past it? <!-- this is the pricing signal step 17 needs -->
+
 ### Anything else
 
 <!-- Screenshots, error messages, the model/provider you were calling, etc. -->
