@@ -358,8 +358,10 @@ function ensureWriteStream() {
  */
 function record(scope, entry) {
   if (usingPostgres()) {
-    recordToPostgres(scope, entry); // fire-and-forget - see its own comment
-    return;
+    // Returns the INSERT promise so tests/scripts can await it; request
+    // paths ignore it, so it stays fire-and-forget for them (a metrics
+    // write must never be the reason a real request fails or slows down).
+    return recordToPostgres(scope, entry);
   }
   try {
     const line = JSON.stringify({
