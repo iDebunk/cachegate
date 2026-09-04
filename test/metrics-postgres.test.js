@@ -74,7 +74,7 @@ test('usingPostgres() is true once MEMOCODE_ROUTER_DATABASE_URL is set', () => {
 
 test('record() + readRecent(): a real INSERT round-trips back out with the same fields', async () => {
   if (!pgAvailable) return;
-  metrics.record(null, { provider: 'openai', model: 'gpt-4o-mini', latency_ms: 120, cost_usd: 0.001, cache_hit: false });
+  await metrics.record(null, { provider: 'openai', model: 'gpt-4o-mini', latency_ms: 120, cost_usd: 0.001, cache_hit: false });
   await flush();
 
   const rows = await metrics.readRecent(null);
@@ -88,7 +88,7 @@ test('record() + readRecent(): a real INSERT round-trips back out with the same 
 
 test('record() persists error + error_type together, exactly like the file backend', async () => {
   if (!pgAvailable) return;
-  metrics.record(null, {
+  await metrics.record(null, {
     provider: 'anthropic',
     error: '401 {"type":"error","error":{"type":"authentication_error"}}',
     error_type: 'authentication_error'
@@ -102,9 +102,9 @@ test('record() persists error + error_type together, exactly like the file backe
 
 test('providerStats(): error rate, avg latency, and lastErrorType all compute correctly from real rows', async () => {
   if (!pgAvailable) return;
-  metrics.record(null, { provider: 'openai', latency_ms: 100 });
-  metrics.record(null, { provider: 'openai', latency_ms: 200 });
-  metrics.record(null, { provider: 'openai', error: '429 {"error":{"type":"rate_limit_error"}}', error_type: 'rate_limit_error' });
+  await metrics.record(null, { provider: 'openai', latency_ms: 100 });
+  await metrics.record(null, { provider: 'openai', latency_ms: 200 });
+  await metrics.record(null, { provider: 'openai', error: '429 {"error":{"type":"rate_limit_error"}}', error_type: 'rate_limit_error' });
   await flush();
 
   const stats = await metrics.providerStats(null);
@@ -116,9 +116,9 @@ test('providerStats(): error rate, avg latency, and lastErrorType all compute co
 
 test('rangeSummary(): cost, cache-hit breakdown, and by_provider all agree with what was actually inserted', async () => {
   if (!pgAvailable) return;
-  metrics.record(null, { provider: 'openai', cost_usd: 0.001, cache_hit: false });
-  metrics.record(null, { provider: 'openai', cost_usd: 0, cache_hit: true, cache_type: 'exact' });
-  metrics.record(null, { provider: 'anthropic', error: '500 boom', error_type: 'unknown' });
+  await metrics.record(null, { provider: 'openai', cost_usd: 0.001, cache_hit: false });
+  await metrics.record(null, { provider: 'openai', cost_usd: 0, cache_hit: true, cache_type: 'exact' });
+  await metrics.record(null, { provider: 'anthropic', error: '500 boom', error_type: 'unknown' });
   await flush();
 
   const summary = await metrics.rangeSummary(null, 14);
@@ -143,7 +143,7 @@ test('rangeSummary(): a row older than the requested window is excluded', async 
   await pool.query(`INSERT INTO router_metrics (ts, provider, cost_usd) VALUES (now() - interval '30 days', 'openai', 0.05)`);
   await pool.end();
 
-  metrics.record(null, { provider: 'openai', cost_usd: 0.001 }); // today, should count
+  await metrics.record(null, { provider: 'openai', cost_usd: 0.001 }); // today, should count
   await flush();
 
   const summary = await metrics.rangeSummary(null, 14); // 30-day-old row is outside this window
@@ -163,7 +163,7 @@ test('pruneOlderThan(): deletes only rows past the cutoff, returns their ids, le
   await pool.query(`INSERT INTO router_metrics (ts, provider) VALUES (now() - interval '100 days', 'openai')`);
   await pool.end();
 
-  metrics.record(null, { provider: 'anthropic' }); // fresh, should survive
+  await metrics.record(null, { provider: 'anthropic' }); // fresh, should survive
   await flush();
 
   const deleted = await metrics.pruneOlderThan(30);
@@ -190,7 +190,7 @@ test('pruneScopedOlderThan(): deletes only that scope\'s rows past the cutoff, l
     (now() - interval '100 days', 'tenant-b', 'openai')`);
   await pool.end();
 
-  metrics.record('tenant-a', { provider: 'anthropic' }); // fresh, should survive
+  await metrics.record('tenant-a', { provider: 'anthropic' }); // fresh, should survive
   await flush();
 
   const deleted = await metrics.pruneScopedOlderThan('tenant-a', 30);
@@ -222,8 +222,8 @@ test('classifyErrorType() is the exact same function regardless of storage backe
 // return nothing once any scoped row exists, instead of everything.
 test('scope isolates one tenant\'s rows from another\'s, over a real Postgres round-trip', async () => {
   if (!pgAvailable) return;
-  metrics.record('tenant-a', { provider: 'openai', latency_ms: 10 });
-  metrics.record('tenant-b', { provider: 'openai', latency_ms: 20 });
+  await metrics.record('tenant-a', { provider: 'openai', latency_ms: 10 });
+  await metrics.record('tenant-b', { provider: 'openai', latency_ms: 20 });
   await flush();
 
   const tenantA = await metrics.readRecent('tenant-a');
@@ -238,9 +238,9 @@ test('scope isolates one tenant\'s rows from another\'s, over a real Postgres ro
 
 test('the global reader (scope null) sees every row over Postgres too, not just unscoped ones', async () => {
   if (!pgAvailable) return;
-  metrics.record(null, { provider: 'openai', latency_ms: 1 });
-  metrics.record('tenant-a', { provider: 'openai', latency_ms: 2 });
-  metrics.record('tenant-b', { provider: 'openai', latency_ms: 3 });
+  await metrics.record(null, { provider: 'openai', latency_ms: 1 });
+  await metrics.record('tenant-a', { provider: 'openai', latency_ms: 2 });
+  await metrics.record('tenant-b', { provider: 'openai', latency_ms: 3 });
   await flush();
 
   const all = await metrics.readRecent(null);
