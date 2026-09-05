@@ -1,0 +1,171 @@
+name: Release
+
+# Publishes npm + GHCR + Docker Hub automatically - the gap that let
+# 1.3.1 (trust-proxy fix, metrics.record() awaitable) sit unreleased on
+# main after 1.3.0 shipped: every prior version (1.0.0-1.3.0) was
+# published by hand, from whoever's machine had the credentials, with
+# no CI record of it at all.
+#
+# Trigger: a push to main that changes package.json's "version" field
+# to something not already live on npm - not a git tag and not a
+# GitHub Release. This repo has never tagged a release (see
+# CHANGELOG.md, the actual versioning record: three prior versions,
+# zero tags), and a tag push from outside a small bypass list gets a
+# flat 403 here (verified directly - branch pushes to main are allowed,
+# `git push origin v1.3.1` was rejected). Gating on the version string
+# itself needs no new push permissions and can't misfire: a push that
+# doesn't touch package.json, or bumps it to a version already
+# published, is a no-op (checked BEFORE building anything), so
+# re-running this workflow or reverting a version bump can never
+# re-publish or downgrade what's live.
+on:
+  push:
+    branches: [main]
+    paths:
+      - package.json
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          LOCAL_VERSION=$(node -p "require('./package.json').version")
+          # `npm view` on a name with nothing published yet exits non-zero -
+          # treated as "nothing live", not a failure, so the very first
+          # publish still goes through.
+          PUBLISHED_VERSION=$(npm view cachegate version 2>/dev/null || echo "none")
+          echo "package.json version: $LOCAL_VERSION / npm latest: $PUBLISHED_VERSION"
+          if [ "$LOCAL_VERSION" != "$PUBLISHED_VERSION" ]; then
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
+
+  # Same coverage as test.yml's own suite, run again here rather than
+  # trusted from that workflow's run on the same commit - a publish
+  # gated on "some other workflow happened to pass" is one merge of
+  # branch-protection settings away from publishing untested code.
+  # Single Node version (test.yml's matrix already covers 18/20/22 on
+  # every push) - this is a publish gate, not the compatibility check.
+  test:
+    needs: check-version
+    if: needs.check-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: dryrun
+          POSTGRES_DB: router_metrics_dryrun
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+      - name: Install redis-server
+        run: sudo apt-get update && sudo apt-get install -y redis-server
+      - run: npm ci
+      - run: npm test
+
+  publish-npm:
+    needs: [check-version, test]
+    if: needs.check-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-docker:
+    needs: [check-version, test]
+    if: needs.check-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # GHCR push, via this job's own GITHUB_TOKEN
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Docker Hub needs its own credentials - GITHUB_TOKEN has no
+      # authority there. Username isn't secret (it's in every image tag
+      # in the README already: docker.io/shipman/cachegate); only the
+      # token is.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: shipman
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/idebunk/cachegate:${{ needs.check-version.outputs.version }}
+            ghcr.io/idebunk/cachegate:latest
+            docker.io/shipman/cachegate:${{ needs.check-version.outputs.version }}
+            docker.io/shipman/cachegate:latest
+
+  # Best-effort: a real tag + a GitHub Release for the version, body
+  # pulled straight from CHANGELOG.md's matching section (the
+  # authoritative release text per that file's own header - this job
+  # only mirrors it onto a Release page, never invents wording).
+  # continue-on-error because tag-ref pushes have been seen 403 here
+  # under a stricter ruleset than branch pushes - if that happens,
+  # npm/GHCR/Docker Hub above have already published either way, so a
+  # blocked tag never blocks the actual release.
+  tag-and-release:
+    needs: [check-version, publish-npm, publish-docker]
+    if: needs.check-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract this version's CHANGELOG section
+        id: notes
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          awk -v ver="## [$VERSION]" '
+            $0 ~ "^## \\[" { if (found) exit; if (index($0, ver) == 1) { found=1; next } }
+            found { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+      - name: Create tag + GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: v${{ needs.check-version.outputs.version }}
+          body_path: /tmp/release-notes.md

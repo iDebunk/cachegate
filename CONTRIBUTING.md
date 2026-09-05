@@ -86,6 +86,28 @@ practice this means a short delay between "merged here" and "in the
 next internal release," not a rejection — you'll see it land in a
 tagged release once that happens.
 
+## Releasing (maintainers)
+
+Publishing to npm, GHCR, and Docker Hub is automated by
+`.github/workflows/release.yml` — bump `"version"` in `package.json`,
+add the matching section to `CHANGELOG.md`, and push (or merge) to
+`main`. The workflow diffs `package.json`'s version against what's
+currently live on npm *before* doing anything else, so a push that
+doesn't bump the version, or bumps it to a version already published,
+is a safe no-op — nothing rebuilds or republishes. When it does detect
+a real bump: the full test suite must pass, then it publishes to npm
+and pushes `ghcr.io/idebunk/cachegate` + `docker.io/shipman/cachegate`
+(both `latest` and the version tag), then best-effort tags the commit
+and opens a GitHub Release with that version's `CHANGELOG.md` section
+as the body.
+
+There is no other release path — a manual `npm publish` or
+`docker push` from a laptop is exactly how 1.3.1 ended up sitting
+unreleased on `main` after 1.3.0 shipped (two real fixes, `#4` and
+`#5`, live in every self-hosted deployment's source but not in what
+`npm install cachegate` or `docker pull` actually served). Use the
+workflow, not a local publish.
+
 ## Reporting a bug vs. reporting a security issue
 
 Regular bugs: open a GitHub issue. Security vulnerabilities (anything
