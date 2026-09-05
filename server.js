@@ -35,6 +35,25 @@ const openaiProvider = require('./providers/openai');
 const failover = require('./failover');
 
 const app = express();
+// Any deployment behind a reverse proxy or load balancer (nginx,
+// Traefik, Render, Heroku, ...) forwards the real client IP in
+// X-Forwarded-For rather than as the raw socket address. Express's own
+// default (`trust proxy` unset, i.e. false) makes express-rate-limit
+// refuse that header outright the moment it's present - it throws
+// ERR_ERL_UNEXPECTED_X_FORWARDED_FOR inside its key generator on every
+// request through a rate-limited route, rather than risk keying
+// per-caller limits off a spoofable header it hasn't been told to
+// trust. Found running this behind a single-hop proxy in production
+// (Cachegate Cloud, 2026-09-04) - not fatal to the request itself, but
+// it means the per-IP rate limiter was keying off the proxy's own IP
+// for every caller instead of each real client, so brute-force/abuse
+// limiting on auth-style routes was effectively shared across ALL
+// users rather than per-user. `1` (trust exactly one hop) is the
+// correct value for a single reverse-proxy topology - the common case
+// this engine actually runs behind. A deployment with more than one
+// proxy hop in front of it should set this to the real hop count
+// instead (see Express's own `trust proxy` docs) rather than assume 1.
+app.set('trust proxy', 1);
 // No X-Powered-By: Express - free, standard hardening (avoids handing a
 // public-facing service's framework fingerprint to every caller for no
 // benefit).
