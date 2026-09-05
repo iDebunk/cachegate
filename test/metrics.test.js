@@ -314,7 +314,13 @@ test('computeSavings() applies the per-model formula: avg miss cost × hits, sum
     { timestamp: '2026-09-05T13:00:00.000Z', model: 'claude-opus', cache_hit: false, cost_usd: 0.10 },
     { timestamp: '2026-09-05T14:00:00.000Z', model: 'claude-opus', cache_hit: true, cost_usd: 0 }
   ];
-  assert.equal(metrics.computeSavings(rows).total, 0.12);
+  // Tolerance, not assert.equal: (0.01+0.03)/2 isn't exactly representable
+  // in floating point, so the real result is 0.12000000000000001, not a
+  // clean 0.12 - same convention cachegate-cloud's usage.test.mjs already
+  // uses for this exact class of money-math assertion. assert.equal here
+  // fails deterministically on every platform (caught by this PR's own
+  // CI, not a flake) - it's the test that was wrong, not computeSavings().
+  assert.ok(Math.abs(metrics.computeSavings(rows).total - 0.12) < 1e-9);
 });
 
 test('computeSavings() gives 0 for a model with hits but no recorded miss (never a cross-model average)', () => {
@@ -325,7 +331,7 @@ test('computeSavings() gives 0 for a model with hits but no recorded miss (never
     { timestamp: '2026-09-05T10:00:00.000Z', model: 'claude-opus', cache_hit: false, cost_usd: 0.10 },
     { timestamp: '2026-09-05T11:00:00.000Z', model: 'claude-haiku', cache_hit: true, cost_usd: 0 }
   ];
-  assert.equal(metrics.computeSavings(rows).total, 0);
+  assert.equal(metrics.computeSavings(rows).total, 0); // exactly 0, no rounding involved
 });
 
 test('computeSavings() ignores error rows and model-less rows, and buckets per day', () => {
@@ -339,7 +345,7 @@ test('computeSavings() ignores error rows and model-less rows, and buckets per d
     { timestamp: '2026-09-05T13:00:00.000Z', provider: 'openai', cache_hit: false, cost_usd: 0.50 }
   ];
   const savings = metrics.computeSavings(rows);
-  assert.equal(savings.total, 0.02); // avg of [0.02] (error excluded) × 1 hit
+  assert.equal(savings.total, 0.02); // avg of [0.02] (error excluded) × 1 hit - a single value, no rounding
   assert.equal(savings.perDay.get('2026-09-05'), 0.02);
 });
 
