@@ -23,6 +23,11 @@ on:
     branches: [main]
     paths:
       - package.json
+  # Manual escape hatch: run from the Actions tab (or the API) without
+  # needing a throwaway package.json edit to fire the path filter above
+  # - e.g. to publish a version bump that landed before this workflow
+  # existed, or to retry after adding/rotating a secret.
+  workflow_dispatch:
 
 permissions:
   contents: read
