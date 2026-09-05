@@ -594,6 +594,7 @@
   function renderKpis(data) {
     var tiles = [
       { label: 'Total cost (' + data.days + 'd)', value: formatUsd(data.total_cost_usd), spark: data.daily.map(function (d) { return d.cost_usd; }) },
+      { label: 'Saved (' + data.days + 'd)', value: formatUsd(data.saved_usd), spark: data.daily.map(function (d) { return d.saved_usd; }) },
       { label: 'Total requests', value: formatCount(data.sample_size) },
       { label: 'Exact hit rate', value: formatPercent(data.cache_hit_rate.exact) },
       { label: 'Semantic hit rate', value: formatPercent(data.cache_hit_rate.semantic) },

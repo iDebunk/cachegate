@@ -352,6 +352,7 @@ app.get('/stats', requireInternalKey, readEndpointLimiter, async (req, res) => {
     const totalCostUsd = recent.reduce((sum, r) => sum + (r.cost_usd || 0), 0);
     const exactHits = recent.filter((r) => r.cache_hit && r.cache_type !== 'semantic').length;
     const semanticHits = recent.filter((r) => r.cache_hit && r.cache_type === 'semantic').length;
+    const savedUsd = metrics.computeSavings(recent).total;
     res.json({
       sample_size: recent.length,
       cache_hit_rate: {
@@ -360,6 +361,7 @@ app.get('/stats', requireInternalKey, readEndpointLimiter, async (req, res) => {
         combined: recent.length ? (exactHits + semanticHits) / recent.length : 0
       },
       total_cost_usd: totalCostUsd,
+      saved_usd: savedUsd,
       by_provider: byProvider,
       // Internal routing configuration - which providers have a key
       // configured, which virtual-model tiers exist, and which strategy picks
