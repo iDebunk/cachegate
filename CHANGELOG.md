@@ -4,6 +4,27 @@ All notable changes to `cachegate` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 uses [semantic versioning](https://semver.org/).
 
+## [1.3.1] - 2026-09-05
+
+### Fixed
+- **Reliability**: `app.set('trust proxy', 1)` — any deployment behind
+  a reverse proxy/load balancer (nginx, Traefik, Render, Heroku, ...)
+  forwards the real client IP via `X-Forwarded-For`. Express's own
+  default (trust proxy unset) made `express-rate-limit` refuse that
+  header outright, throwing `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` on
+  every request through a rate-limited route with no custom
+  `keyGenerator` (`/stats`, `/dashboard/data`). Not fatal to the
+  request, but it meant per-IP rate limiting was keyed off the proxy's
+  own IP for every caller instead of each real client — brute-force/
+  abuse limiting was effectively shared across all callers rather than
+  per-caller. Found running this in production behind a single-hop
+  proxy (Cachegate Cloud, 2026-09-04).
+- `metrics.record()` now returns the underlying Postgres INSERT promise
+  instead of discarding it, so tests/scripts can `await` it. Request
+  paths still ignore the return value, so it stays fire-and-forget for
+  them — a metrics write must never be the reason a real request fails
+  or slows down.
+
 ## [1.3.0] - 2026-09-03
 
 ### Added
