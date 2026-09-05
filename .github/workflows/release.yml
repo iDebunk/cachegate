@@ -28,6 +28,18 @@ on:
   # - e.g. to publish a version bump that landed before this workflow
   # existed, or to retry after adding/rotating a secret.
   workflow_dispatch:
+    inputs:
+      force:
+        description: >-
+          Run even though this version is already live on npm - for
+          retrying a run where npm succeeded but Docker (or vice versa)
+          didn't, without a throwaway version bump. publish-npm skips
+          itself gracefully when the version's already there (npm
+          errors on a duplicate publish); publish-docker just re-pushes
+          the same tag, which registries treat as a normal overwrite,
+          not an error.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -47,8 +59,8 @@ jobs:
           # treated as "nothing live", not a failure, so the very first
           # publish still goes through.
           PUBLISHED_VERSION=$(npm view cachegate version 2>/dev/null || echo "none")
-          echo "package.json version: $LOCAL_VERSION / npm latest: $PUBLISHED_VERSION"
-          if [ "$LOCAL_VERSION" != "$PUBLISHED_VERSION" ]; then
+          echo "package.json version: $LOCAL_VERSION / npm latest: $PUBLISHED_VERSION / force: ${{ github.event.inputs.force }}"
+          if [ "$LOCAL_VERSION" != "$PUBLISHED_VERSION" ] || [ "${{ github.event.inputs.force }}" == "true" ]; then
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
@@ -100,7 +112,14 @@ jobs:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
       - run: npm ci
-      - run: npm publish
+      - name: Publish (skip gracefully if this version is already live)
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          if npm view "cachegate@$VERSION" version >/dev/null 2>&1; then
+            echo "cachegate@$VERSION is already on npm - skipping (this is expected on a force-retry of a partially-failed release)."
+          else
+            npm publish
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
