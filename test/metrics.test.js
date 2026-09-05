@@ -303,6 +303,52 @@ test('rangeSummary() on an empty log returns zeroed rates, not NaN or a crash', 
   assert.deepEqual(summary.by_provider, {});
 });
 
+test('computeSavings() applies the per-model formula: avg miss cost × hits, summed across models', () => {
+  const metrics = freshMetrics();
+  const rows = [
+    // model A: misses cost 0.01 and 0.03 (avg 0.02), one hit -> 0.02
+    { timestamp: '2026-09-05T10:00:00.000Z', model: 'claude-haiku', cache_hit: false, cost_usd: 0.01 },
+    { timestamp: '2026-09-05T11:00:00.000Z', model: 'claude-haiku', cache_hit: false, cost_usd: 0.03 },
+    { timestamp: '2026-09-05T12:00:00.000Z', model: 'claude-haiku', cache_hit: true, cost_usd: 0 },
+    // model B: separate, one miss 0.10, one hit -> 0.10
+    { timestamp: '2026-09-05T13:00:00.000Z', model: 'claude-opus', cache_hit: false, cost_usd: 0.10 },
+    { timestamp: '2026-09-05T14:00:00.000Z', model: 'claude-opus', cache_hit: true, cost_usd: 0 }
+  ];
+  // Tolerance, not assert.equal: (0.01+0.03)/2 isn't exactly representable
+  // in floating point, so the real result is 0.12000000000000001, not a
+  // clean 0.12 - same convention cachegate-cloud's usage.test.mjs already
+  // uses for this exact class of money-math assertion. assert.equal here
+  // fails deterministically on every platform (caught by this PR's own
+  // CI, not a flake) - it's the test that was wrong, not computeSavings().
+  assert.ok(Math.abs(metrics.computeSavings(rows).total - 0.12) < 1e-9);
+});
+
+test('computeSavings() gives 0 for a model with hits but no recorded miss (never a cross-model average)', () => {
+  const metrics = freshMetrics();
+  const rows = [
+    // opus has a miss; haiku has ONLY hits (no miss) - haiku contributes 0,
+    // it must not borrow opus's miss cost (the cross-model-average trap).
+    { timestamp: '2026-09-05T10:00:00.000Z', model: 'claude-opus', cache_hit: false, cost_usd: 0.10 },
+    { timestamp: '2026-09-05T11:00:00.000Z', model: 'claude-haiku', cache_hit: true, cost_usd: 0 }
+  ];
+  assert.equal(metrics.computeSavings(rows).total, 0); // exactly 0, no rounding involved
+});
+
+test('computeSavings() ignores error rows and model-less rows, and buckets per day', () => {
+  const metrics = freshMetrics();
+  const rows = [
+    // an ERROR "miss" must not count toward the miss cost
+    { timestamp: '2026-09-05T10:00:00.000Z', model: 'claude-haiku', cache_hit: false, cost_usd: 0.99, error: 'boom' },
+    { timestamp: '2026-09-05T11:00:00.000Z', model: 'claude-haiku', cache_hit: false, cost_usd: 0.02 },
+    { timestamp: '2026-09-05T12:00:00.000Z', model: 'claude-haiku', cache_hit: true, cost_usd: 0 },
+    // no model -> skipped entirely
+    { timestamp: '2026-09-05T13:00:00.000Z', provider: 'openai', cache_hit: false, cost_usd: 0.50 }
+  ];
+  const savings = metrics.computeSavings(rows);
+  assert.equal(savings.total, 0.02); // avg of [0.02] (error excluded) × 1 hit - a single value, no rounding
+  assert.equal(savings.perDay.get('2026-09-05'), 0.02);
+});
+
 // Seams work (roadmap: engine/cloud "wrap it, don't fork it") - the two
 // halves of the scope contract, regression-tested rather than just
 // documented: a real scope isolates readers from every OTHER scope's

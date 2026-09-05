@@ -472,6 +472,61 @@ async function providerStats(scope, windowSize = 50) {
  * underlying log, two different questions - not accidentally
  * duplicated logic.
  */
+
+// Shared "$ saved" formula (mirrors cachegate-cloud's usage.mjs
+// estimatedSavings / estimatedSavingsGlobal, 2026-09-05 Phase 2 step 20):
+// for each model, the average cost of a cache-MISS (cache_hit === false,
+// no error) times that model's cache-HIT count, summed across models. A
+// model with hits but no recorded miss yet contributes 0 - never a
+// cross-model average (usage.mjs's own documented honesty floor). Rows
+// with no model are skipped. Pure (takes rows, returns { total, perDay })
+// so it's directly unit-testable and shared by rangeSummary() and
+// server.js's GET /stats without duplicating the formula.
+function computeSavings(rows) {
+  const all = new Map(); // model -> accumulator
+  const perDay = new Map(); // YYYY-MM-DD -> Map(model -> accumulator)
+  const accFor = (map, key) => {
+    let acc = map.get(key);
+    if (!acc) {
+      acc = { missCostSum: 0, missCount: 0, hits: 0 };
+      map.set(key, acc);
+    }
+    return acc;
+  };
+  for (const row of rows) {
+    if (!row.model) continue;
+    const acc = accFor(all, row.model);
+    const date = row.timestamp.slice(0, 10);
+    let dayMap = perDay.get(date);
+    if (!dayMap) {
+      dayMap = new Map();
+      perDay.set(date, dayMap);
+    }
+    const dayAcc = accFor(dayMap, row.model);
+    if (row.cache_hit === true) {
+      acc.hits += 1;
+      dayAcc.hits += 1;
+    } else if (row.cache_hit === false && !row.error) {
+      acc.missCostSum += row.cost_usd || 0;
+      acc.missCount += 1;
+      dayAcc.missCostSum += row.cost_usd || 0;
+      dayAcc.missCount += 1;
+    }
+  }
+  const sum = (map) => {
+    let total = 0;
+    for (const acc of map.values()) {
+      if (acc.hits > 0 && acc.missCount > 0) {
+        total += (acc.missCostSum / acc.missCount) * acc.hits;
+      }
+    }
+    return total;
+  };
+  const out = new Map();
+  for (const [date, map] of perDay) out.set(date, sum(map));
+  return { total: sum(all), perDay: out };
+}
+
 async function rangeSummary(scope, days = 14) {
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
 
@@ -508,7 +563,7 @@ async function rangeSummary(scope, days = 14) {
   for (const row of inRange) {
     const date = row.timestamp.slice(0, 10); // YYYY-MM-DD (UTC, from toISOString())
     if (!dailyByDate.has(date)) {
-      dailyByDate.set(date, { date, requests: 0, cost_usd: 0, exact_hits: 0, semantic_hits: 0, misses: 0, errors: 0 });
+      dailyByDate.set(date, { date, requests: 0, cost_usd: 0, saved_usd: 0, exact_hits: 0, semantic_hits: 0, misses: 0, errors: 0 });
     }
     const bucket = dailyByDate.get(date);
     bucket.requests += 1;
@@ -541,6 +596,8 @@ async function rangeSummary(scope, days = 14) {
     }
   }
 
+  const savings = computeSavings(inRange);
+
   const providerSummary = {};
   for (const [name, p] of Object.entries(byProvider)) {
     providerSummary[name] = {
@@ -555,6 +612,7 @@ async function rangeSummary(scope, days = 14) {
     days,
     sample_size: inRange.length,
     total_cost_usd: totalCostUsd,
+    saved_usd: savings.total,
     cache_hit_rate: {
       exact: inRange.length ? exactHits / inRange.length : 0,
       semantic: inRange.length ? semanticHits / inRange.length : 0,
@@ -562,7 +620,9 @@ async function rangeSummary(scope, days = 14) {
     },
     error_rate: inRange.length ? errors / inRange.length : 0,
     by_provider: providerSummary,
-    daily: [...dailyByDate.values()].sort((a, b) => a.date.localeCompare(b.date))
+    daily: [...dailyByDate.values()]
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((d) => ({ ...d, saved_usd: savings.perDay.get(d.date) || 0 }))
   };
 }
 
@@ -647,6 +707,7 @@ module.exports = {
   readRecent,
   providerStats,
   rangeSummary,
+  computeSavings,
   pruneOlderThan,
   pruneScopedOlderThan,
   currentLogPath,
