@@ -22,11 +22,80 @@ const redis = require('./redisClient');
 // isolated even if the caller's own scope-naming convention were ever
 // guessed or leaked; a compromised/guessed prefix alone can't be walked
 // into another scope's cached content.
+
+// Prompt canonicalization (Phase 2, step 21) - normalizes ONLY what gets
+// HASHED, never what is sent to the provider (buildCacheKey receives the
+// payload, but the provider call in server.js uses payload.messages raw).
+// Two prompts that differ only by whitespace/case-of-structure/literal
+// values must hash to the SAME key. Conservative by design: a false-
+// positive collapse (two prompts that actually want different answers
+// sharing one key) is worse than a miss, so this folds only surface-level
+// variation, never meaning.
+function normalizeMessages(messages) {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((m) => {
+    if (!m || typeof m !== 'object') return m;
+    // Canonical field order (role, content first) so {role,content} and
+    // {content,role} hash identically; any other fields (name,
+    // tool_call_id, ...) keep their original relative order after that.
+    const out = { role: m.role, content: normalizeContent(m.content) };
+    for (const key of Object.keys(m)) {
+      if (key !== 'role' && key !== 'content') out[key] = m[key];
+    }
+    return out;
+  });
+}
+
+function normalizeContent(content) {
+  if (typeof content === 'string') return normalizeText(content);
+  if (Array.isArray(content)) return content.map(normalizeContent);
+  return content;
+}
+
+// Conservative canonical form of one text block: NFC unicode, structural
+// punctuation folding, whitespace collapse, then literal slotting. Email
+// and URL slotting are unconditional (an incidental identifier really does
+// want the same answer). Number and date slotting are env-gated, default
+// OFF (CACHE_KEY_SLOT_NUMBERS=true to opt in) - a number or date is very
+// often THE substance of the answer, and on an EXACT cache (no similarity
+// threshold, a guaranteed match) that's a correctness bug, not a tuning
+// knob (Phase 2 step 21, reviewed 2026-09-06). Slotting order is
+// most-specific first (URL -> email -> date -> number) so a longer token
+// isn't half-consumed by a shorter pattern.
+function normalizeText(text) {
+  const base = String(text)
+    .normalize('NFC')
+    .replace(/\u00A0/g, ' ') // non-breaking space
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'") // curly single quotes
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"') // curly double quotes
+    .replace(/[\u2013\u2014]/g, '-') // en/em dash
+    .replace(/\u2026/g, '...') // ellipsis
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/(?:https?:\/\/|www\.)\S+/gi, '<var>') // URLs
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<var>'); // emails
+
+  if (process.env.CACHE_KEY_SLOT_NUMBERS === 'true') {
+    return base
+      .replace(/\b\d{4}-\d{2}-\d{2}\b/g, '<var>') // ISO dates
+      .replace(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g, '<var>') // slash dates
+      .replace(/\b\d+(?:\.\d+)?\b/g, '<var>'); // numbers
+  }
+  return base;
+}
+
 function buildCacheKey(scope, payload) {
+  const canonicalMessages = normalizeMessages(payload.messages);
+  if (process.env.CACHE_KEY_DEBUG) {
+    // Traceable, not silent (step 21.2): a false-positive collision can be
+    // reconstructed by re-running normalizeMessages on the original - this
+    // opt-in log line just makes it visible without that extra step.
+    console.log('[cache] canonical messages:', JSON.stringify(canonicalMessages));
+  }
   const normalized = JSON.stringify({
     ...(scope != null ? { scope } : {}),
     model: payload.model,
-    messages: payload.messages,
+    messages: canonicalMessages,
     temperature: payload.temperature ?? 0.0,
     max_tokens: payload.max_tokens,
     tools: payload.tools,
@@ -45,6 +114,8 @@ function buildCacheKey(scope, payload) {
 
 module.exports = {
   buildCacheKey,
+  normalizeMessages,
+  normalizeText,
 
   isConnected() {
     return redis.isConnected();

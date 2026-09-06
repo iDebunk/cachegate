@@ -61,6 +61,85 @@ test('buildCacheKey folds a real scope into both the prefix and the hashed paylo
   assert.notEqual(hashOf(scopedA), hashOf(unscoped));
 });
 
+// Step 21 (prompt canonicalization) - buildCacheKey now hashes a
+// canonical form of `messages`, so surface-level variation no longer
+// splits one logical prompt into many cache keys.
+
+test('buildCacheKey folds whitespace and field-order variation into one key (21.1)', () => {
+  const base = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Summarize this document for me' }] };
+  const variants = [
+    { model: 'gpt-4o-mini', messages: [{ role: 'user', content: '  Summarize this document for me  ' }] },
+    { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Summarize   this\tdocument\nfor me' }] },
+    { model: 'gpt-4o-mini', messages: [{ content: 'Summarize this document for me', role: 'user' }] }
+  ];
+  for (const v of variants) {
+    assert.equal(cache.buildCacheKey(null, base), cache.buildCacheKey(null, v));
+  }
+});
+
+test('buildCacheKey folds structural punctuation (curly quotes/dashes) to ASCII (21.1)', () => {
+  const curly = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'What is \u201Chello\u201D \u2014 really?' }] };
+  const ascii = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'What is "hello" - really?' }] };
+  assert.equal(cache.buildCacheKey(null, curly), cache.buildCacheKey(null, ascii));
+});
+
+test('buildCacheKey slots email literals so templated paraphrases share a key (21.2)', () => {
+  const a = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Summarize john@x.com email' }] };
+  const b = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Summarize jane@y.com email' }] };
+  assert.equal(cache.buildCacheKey(null, a), cache.buildCacheKey(null, b));
+});
+
+test('buildCacheKey does NOT slot numbers/dates by default (21.2 - gated OFF, Claude review 2026-09-06)', () => {
+  delete process.env.CACHE_KEY_SLOT_NUMBERS;
+  const a = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'What happened on 2024-01-15?' }] };
+  const b = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'What happened on 2024-03-22?' }] };
+  assert.notEqual(cache.buildCacheKey(null, a), cache.buildCacheKey(null, b));
+  const c = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Give me 5 examples' }] };
+  const d = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Give me 3 examples' }] };
+  assert.notEqual(cache.buildCacheKey(null, c), cache.buildCacheKey(null, d));
+});
+
+test('buildCacheKey slots numbers/dates only when CACHE_KEY_SLOT_NUMBERS=true (21.2)', () => {
+  process.env.CACHE_KEY_SLOT_NUMBERS = 'true';
+  try {
+    const a = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'What happened on 2024-01-15?' }] };
+    const b = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'What happened on 2024-03-22?' }] };
+    assert.equal(cache.buildCacheKey(null, a), cache.buildCacheKey(null, b));
+    const c = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Give me 5 examples' }] };
+    const d = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Give me 3 examples' }] };
+    assert.equal(cache.buildCacheKey(null, c), cache.buildCacheKey(null, d));
+  } finally {
+    delete process.env.CACHE_KEY_SLOT_NUMBERS;
+  }
+});
+
+test('buildCacheKey still differs for genuinely different prompts (no over-collapse)', () => {
+  const a = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Summarize this document' }] };
+  const b = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Translate this document' }] };
+  assert.notEqual(cache.buildCacheKey(null, a), cache.buildCacheKey(null, b));
+});
+
+test('buildCacheKey still differs when tools or response_format differ (21.3 - no regression)', () => {
+  const base = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }] };
+  const withTools = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }], tools: [{ type: 'function', function: { name: 'f' } }] };
+  const withJson = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }], response_format: { type: 'json_object' } };
+  assert.notEqual(cache.buildCacheKey(null, base), cache.buildCacheKey(null, withTools));
+  assert.notEqual(cache.buildCacheKey(null, base), cache.buildCacheKey(null, withJson));
+});
+
+test('normalizeMessages returns a NEW array and never mutates the payload messages (21.1)', () => {
+  const messages = [{ role: 'user', content: '  hi  ' }];
+  const payload = { model: 'gpt-4o-mini', messages };
+  cache.buildCacheKey(null, payload);
+  // the raw messages sent to the provider are untouched, non-canonicalized
+  assert.deepEqual(payload.messages, [{ role: 'user', content: '  hi  ' }]);
+  // and normalizeMessages is pure: new array, canonical copy, input intact
+  const canonical = cache.normalizeMessages(messages);
+  assert.notEqual(canonical, messages);
+  assert.equal(canonical[0].content, 'hi');
+  assert.deepEqual(canonical, cache.normalizeMessages(messages));
+});
+
 test('isConnected() is false with no REDIS_URL configured', () => {
   // This test suite never sets REDIS_URL, matching the documented
   // graceful-degradation path (cache disabled, not crashed).
