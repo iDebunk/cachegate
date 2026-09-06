@@ -41,9 +41,14 @@ function detectInjection(text) {
 }
 
 function extractPromptText(messages) {
+  if (!Array.isArray(messages)) return '';
   return messages
     .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
     .join('\n');
+}
+
+function isEnabled() {
+  return process.env.GUARDRAILS_ENABLED === 'true';
 }
 
 // The policy-enforcement hook: evaluate a request's messages and return a
@@ -51,7 +56,18 @@ function extractPromptText(messages) {
 // shape is deliberately minimal so pii.js's redaction and the future
 // server.js wiring can feed additional findings into the same decision
 // without reshaping this module.
+//
+// Gated on isEnabled() INSIDE evaluate() itself, not just left to the
+// caller to check - same "always callable, flag decides" contract as
+// pii.js's redact(). Without this, a future server.js call site that
+// forgot its own `if (guardrails.isEnabled())` guard would silently
+// flag/block on every request regardless of the deployment's own
+// GUARDRAILS_ENABLED setting - exactly the gap this module's own header
+// comment claims doesn't exist ("gated off by default").
 function evaluate(messages) {
+  if (!isEnabled()) {
+    return { decision: 'allow', reasons: [] };
+  }
   const text = extractPromptText(messages);
   const hits = detectInjection(text);
   if (hits.length === 0) {
@@ -59,10 +75,6 @@ function evaluate(messages) {
   }
   const action = process.env.GUARDRAILS_INJECTION_ACTION || 'flag'; // block | flag | log
   return { decision: action, reasons: hits };
-}
-
-function isEnabled() {
-  return process.env.GUARDRAILS_ENABLED === 'true';
 }
 
 module.exports = { detectInjection, evaluate, isEnabled, INJECTION_PATTERNS };
