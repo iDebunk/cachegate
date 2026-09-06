@@ -4,6 +4,104 @@ All notable changes to `cachegate` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 uses [semantic versioning](https://semver.org/).
 
+## [1.4.0] - 2026-09-06
+
+Everything below is additive and opt-in — every new feature ships
+gated off by default (an env var, or a value that matches today's
+behavior), so an existing deployment that changes nothing is
+byte-identical in observable behavior to 1.3.1.
+
+### Added
+- **`saved_usd` ($ saved)**: `rangeSummary()`, `GET /stats`, and the
+  dashboard now report estimated dollars saved by cache hits (average
+  cost of a same-model miss × that model's hit count), alongside the
+  existing hit-rate numbers.
+- **Prompt canonicalization** (`cache.js`): the exact-cache key now
+  normalizes whitespace/case/Unicode/structural punctuation and
+  canonical field ordering before hashing, so cosmetic variants of an
+  identical prompt share one cache entry. Email/URL literal slotting
+  (`<var>` placeholders) is unconditional; number/date slotting is
+  gated behind `CACHE_KEY_SLOT_NUMBERS` (default **off**) since it can
+  make genuinely different prompts ("15% of 200" vs. "25% of 900")
+  collide on an *exact* cache with no similarity threshold.
+- **Local embeddings backend** (`embeddings.js`): `all-MiniLM-L6-v2`
+  (384-dim) via `@huggingface/transformers`, gated behind
+  `SEMANTIC_CACHE_LOCAL_EMBEDDINGS` (default **off** — OpenAI stays the
+  default embeddings backend). `npm run eval:semantic-cache` runs a
+  curated precision/recall harness against whichever backend is
+  active, for an apples-to-apples comparison before switching.
+- **Request coalescing** (`coalescing.js`): concurrent identical
+  cache-miss requests now share one upstream dispatch instead of each
+  triggering its own — a joiner's metrics row is marked `coalesced` and
+  inherits the leader's `quality_score`, not omitted like a cache hit.
+- **Guardrails** — PII redaction (`pii.js`, gated behind
+  `GUARDRAILS_PII_REDACTION`): pattern-based detection/redaction of
+  emails, phone numbers, SSNs, credit cards, and common API-key/secret
+  shapes before a prompt ever reaches a provider or the cache. Prompt-
+  injection detection + policy (`guardrails.js`, gated behind
+  `GUARDRAILS_ENABLED`): heuristic detection of instruction-override,
+  system-prompt-leak, and jailbreak patterns, `block`/`flag`/`log`
+  policy actions (default `flag`, since heuristics can false-positive).
+- **`quality_score` reward signal** (`metrics.js`): every dispatch now
+  records `1.0` (clean success) / `0.5` (success after failover) /
+  `0.0` (failure); cache hits correctly omit it. `providerStats()`
+  gained `avgQualityScore`, null-tolerant like the existing
+  `avgLatencyMs`.
+- **Health-scoring "shed" tier** (`router.js`): `SHED_ERROR_RATE`
+  (default 0.9) and `SHED_QUALITY_SCORE` (default 0.2) fully exclude a
+  clearly-degrading candidate from a tier's pool — stricter than the
+  existing 50% "unhealthy" filter, which only deprioritizes. A
+  deterministic fallback to the full ranked list applies if shedding
+  would leave the pool empty. Stateless — both scores come fresh from
+  the existing rolling-window stats on every call, no new
+  circuit-breaker store or timers.
+- **Cascade routing** (`cascade.js`, gated behind `CASCADE_ENABLED`):
+  for a `router:` virtual model, dispatch to the cheapest candidate
+  first and escalate to the next-ranked one if its confidence is below
+  `CASCADE_CONFIDENCE_THRESHOLD` (default 0.5) — orthogonal to
+  `failover.js`'s error-driven retry. Confidence is per-provider:
+  OpenAI via native `logprobs` (near-zero marginal cost, opted into
+  only when cascade is active); Anthropic via an opt-in grader model
+  (`CASCADE_GRADER_MODEL`, unset means fail-open — no Anthropic
+  escalation), a bounded single extra request rather than the 2-3×
+  cost multiplier self-consistency re-sampling would impose.
+- **Observability + tracing** (`tracing.js`, new): a request-scoped
+  `trace_id`, returned as `X-Cachegate-Trace-Id` and threaded through
+  every `metrics.record()` call a request makes (cache hits, each
+  dispatch attempt, a coalesced leader/joiner pair, a cascade's
+  cheap-then-escalated pair), so one request's full path can be
+  reconstructed from its metrics rows. OpenTelemetry export (gated
+  behind `OTEL_ENABLED` + `OTEL_EXPORTER_OTLP_ENDPOINT` — unset means
+  the SDK never initializes at all): a root span per request plus
+  child spans for cache lookup, coalescing wait, and each dispatch
+  attempt.
+
+### Fixed
+- **Security**: the local-embeddings dependency was originally wired
+  through `@xenova/transformers`, which pulls a critical CVE
+  (`protobufjs` < 7.5.5, CVSS 9.8, arbitrary code execution) via
+  `onnxruntime-web` — shipped to every installer regardless of the
+  feature flag. Swapped to `@huggingface/transformers` (same
+  `pipeline()` API, patched `protobufjs`) before this ever reached a
+  release.
+- **Security**: the OpenTelemetry SDK's initial dependency versions
+  pulled a tree of vulnerable transitive `@opentelemetry/*` packages
+  (23 findings, 3 high — including a real DoS in `propagator-jaeger`'s
+  header parsing) — bumped to the `^0.222.0` line before release,
+  verified compatible against a real OTLP-shaped receiver.
+- **`package.json`'s `"files"` array** was missing `coalescing.js`,
+  `guardrails.js`, and `pii.js` (added across steps this array wasn't
+  updated for) — a fresh `npm install` of this version would have
+  crashed with `Cannot find module` the moment any of them was
+  required. Caught and fixed before ever shipping; verified end-to-end
+  by packing the real tarball and requiring it from a clean install.
+- A coalesced request's own status code could leak the internal
+  retry-bookkeeping code instead of the contractually-fixed 502, and a
+  static config error (missing key, unsupported model) could pollute
+  provider-health metrics as if it were a live failure — both
+  introduced by coalescing's dispatch wiring, both fixed before this
+  release with regression coverage.
+
 ## [1.3.1] - 2026-09-05
 
 ### Fixed
