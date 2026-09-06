@@ -11,13 +11,18 @@
 const MAX_INFLIGHT = Number(process.env.COALESCE_MAX_INFLIGHT) || 500;
 const WAIT_TIMEOUT_MS = Number(process.env.COALESCE_WAIT_TIMEOUT_MS) || 3000;
 
-const inFlight = new Map(); // cacheKey -> Promise<result>
+const inFlight = new Map(); // cacheKey -> { promise, traceId }
 
-// Returns { result, coalesced }. coalesced:true means this caller joined an
-// existing in-flight dispatch (and should record a `coalesced` metric, zero
-// NEW cost); coalesced:false means this caller was the leader, or dispatched
-// independently after a join-timeout / capacity skip.
-async function joinOrRun(key, dispatch) {
+// Returns { result, coalesced, joinedTraceId? }. coalesced:true means this
+// caller joined an existing in-flight dispatch (and should record a
+// `coalesced` metric, zero NEW cost); coalesced:false means this caller was
+// the leader, or dispatched independently after a join-timeout / capacity
+// skip. `traceId` is this caller's own request trace id (stored when this
+// caller becomes the leader); `joinedTraceId` is returned to a joiner only,
+// pointing at the leader's trace id, so a joiner's metrics row can record
+// both "who I am" (its own trace_id) and "whose dispatch I shared"
+// (joined_trace_id) - the joiner never stopped being its own request.
+async function joinOrRun(key, dispatch, traceId) {
   const existing = inFlight.get(key);
 
   if (existing) {
@@ -28,7 +33,7 @@ async function joinOrRun(key, dispatch) {
     // (Promise.race settles with the first settled promise), so a joiner
     // never gets a false success.
     const outcome = await Promise.race([
-      existing.then((result) => ({ result, coalesced: true })),
+      existing.promise.then((result) => ({ result, coalesced: true, joinedTraceId: existing.traceId })),
       new Promise((resolve) => setTimeout(() => resolve(undefined), WAIT_TIMEOUT_MS))
     ]);
     if (outcome !== undefined) return outcome;
@@ -38,7 +43,7 @@ async function joinOrRun(key, dispatch) {
     // BEFORE awaiting it, so the next caller finds it. Self-removes on
     // settle, success or failure.
     const promise = dispatch();
-    inFlight.set(key, promise);
+    inFlight.set(key, { promise, traceId });
     try {
       const result = await promise;
       return { result, coalesced: false };
@@ -46,7 +51,7 @@ async function joinOrRun(key, dispatch) {
       // Remove only if it is still OUR entry (a timed-out joiner that
       // dispatched independently never stored its own, so this guard is
       // defensive against any future change that does).
-      if (inFlight.get(key) === promise) inFlight.delete(key);
+      if (inFlight.get(key) && inFlight.get(key).promise === promise) inFlight.delete(key);
     }
   }
 

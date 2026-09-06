@@ -35,6 +35,7 @@ const openaiProvider = require('./providers/openai');
 const failover = require('./failover');
 const coalescing = require('./coalescing');
 const cascade = require('./cascade');
+const tracing = require('./tracing');
 const pii = require('./pii');
 const guardrails = require('./guardrails');
 
@@ -83,6 +84,11 @@ function redactMessages(messages) {
 }
 
 const app = express();
+// Step 36 (observability): initialize OTel once, at module load. A no-op
+// unless OTEL_ENABLED + OTEL_EXPORTER_OTLP_ENDPOINT are both set (see
+// tracing.js) - so both the standalone server and a wrapping deployment
+// (cachegate-cloud's cloud-server.js) get tracing without any extra call.
+tracing.initTracing();
 // Any deployment behind a reverse proxy or load balancer (nginx,
 // Traefik, Render, Heroku, ...) forwards the real client IP in
 // X-Forwarded-For rather than as the raw socket address. Express's own
@@ -556,16 +562,16 @@ async function dispatchToProvider(scope, provider, payload, options = {}) {
 // "insufficient data must never escalate" discipline as everywhere else.
 // The grader's own provider call is recorded like any other real dispatch so
 // its cost is never invisible.
-function buildConfidenceEstimator(scope, payload, requestedModel) {
+function buildConfidenceEstimator(scope, payload, requestedModel, traceId) {
   return async (result) => {
     if (!result) return null;
     if (result.provider === 'openai') return cascade.openaiLogprobConfidence(result);
-    if (result.provider === 'anthropic') return graderConfidence(scope, payload, requestedModel, result);
+    if (result.provider === 'anthropic') return graderConfidence(scope, payload, requestedModel, result, traceId);
     return null;
   };
 }
 
-async function graderConfidence(scope, payload, requestedModel, result) {
+async function graderConfidence(scope, payload, requestedModel, result, traceId) {
   const graderModel = process.env.CASCADE_GRADER_MODEL;
   if (!graderModel) return null; // no grader configured -> no signal -> fail open
   const graderProvider = isModelAnthropic(graderModel) ? 'anthropic' : (isModelOpenAi(graderModel) ? 'openai' : null);
@@ -583,6 +589,7 @@ async function graderConfidence(scope, payload, requestedModel, result) {
       requested_model: requestedModel,
       cache_hit: false,
       quality_score: 1.0,
+      trace_id: traceId,
       latency_ms: grade.latency_ms,
       cost_usd: grade.cost_usd
     });
@@ -606,7 +613,7 @@ async function graderConfidence(scope, payload, requestedModel, result) {
 // about which model answered - a materially harder problem than the
 // non-streaming case, left as a documented gap rather than shipped
 // half-working (see ROADMAP.md).
-async function handleStreamingDispatch(req, res, payload, requestedModel, routingDecision) {
+async function handleStreamingDispatch(req, res, payload, requestedModel, routingDecision, traceId) {
   const scope = req.scope;
   let providerName;
   if (isModelAnthropic(payload.model)) {
@@ -651,6 +658,7 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
       requested_model: requestedModel,
       cache_hit: false,
       quality_score: 0.0,
+      trace_id: traceId,
       error: err.message,
       error_type: metrics.classifyErrorType(err.message)
     });
@@ -677,12 +685,29 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
     requested_model: requestedModel,
     cache_hit: false,
     quality_score: 1.0,
+    trace_id: traceId,
     latency_ms: result.latency_ms,
     cost_usd: result.cost_usd
   });
 }
 
+// The one request-scoped correlation id (step 36.1): generated once per
+// incoming request, returned as X-Cachegate-Trace-Id, and threaded through
+// every metrics.record() this request makes - so a support conversation or a
+// customer's own log line can reference the exact id that ties together every
+// metrics row (cache hit, each dispatch attempt, a cascade's cheap+escalated
+// pair, a coalesced joiner+leader pair) this request produced. Same generator
+// family as streaming.genId() (crypto.randomBytes hex), no second scheme.
 app.post('/v1/chat/completions', async (req, res) => {
+  const traceId = crypto.randomBytes(16).toString('hex');
+  res.setHeader('X-Cachegate-Trace-Id', traceId);
+  const modelName = (req.body && req.body.model) || 'chat.completion';
+  await tracing.withRootSpan(modelName, { trace_id: traceId }, () =>
+    handleCompletion(req, res, traceId)
+  );
+});
+
+async function handleCompletion(req, res, traceId) {
   const payload = req.body;
   const scope = req.scope; // set by requireInternalKey/seams.authenticate - null unless configured
 
@@ -754,7 +779,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   // share the same cache entries). A hit is served the same way
   // whether or not the caller asked for stream:true - see
   // streamCachedReplay() for the streaming case.
-  const cached = await cache.get(scope, payload);
+  const cached = await tracing.withSpan('cache.exact', { trace_id: traceId }, () => cache.get(scope, payload));
   if (cached) {
     metrics.record(scope, {
       provider: cached.provider,
@@ -762,6 +787,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       requested_model: requestedModel,
       cache_hit: true,
       cache_type: 'exact',
+      trace_id: traceId,
       latency_ms: 0,
       cost_usd: 0
     });
@@ -789,7 +815,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   // prompt, not an identical one). This costs one embedding call
   // whether or not it finds anything; see semanticCache.js for why
   // that's a deliberate tradeoff, not overhead to optimize away.
-  const semanticMatch = await semanticCache.findMatch(scope, payload);
+  const semanticMatch = await tracing.withSpan('cache.semantic', { trace_id: traceId }, () => semanticCache.findMatch(scope, payload));
   if (semanticMatch) {
     const hit = semanticMatch.entry;
     metrics.record(scope, {
@@ -799,6 +825,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       cache_hit: true,
       cache_type: 'semantic',
       semantic_similarity: semanticMatch.similarity,
+      trace_id: traceId,
       latency_ms: 0,
       cost_usd: 0
     });
@@ -829,7 +856,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   // so the two need different error-reporting strategies (see
   // handleStreamingDispatch's error frame vs. this path's 502 JSON).
   if (wantsStream) {
-    return handleStreamingDispatch(req, res, payload, requestedModel, routingDecision);
+    return handleStreamingDispatch(req, res, payload, requestedModel, routingDecision, traceId);
   }
 
   try {
@@ -839,9 +866,16 @@ app.post('/v1/chat/completions', async (req, res) => {
     // callback below is the leader's dispatch - provider call, cache
     // writes, and the leader's cache-miss metric - and a joiner awaits
     // that same promise instead of dispatching again.
-    const { result: dispatchOutcome, coalesced: wasCoalesced } = await coalescing.joinOrRun(
-      cache.buildCacheKey(scope, payload),
-      async () => {
+    // The coalescing span carries a leader/joiner role attribute so a trace
+    // visibly distinguishes the request that actually dispatched (leader)
+    // from the ones that shared its upstream call (joiners). The role is only
+    // known after joinOrRun settles, so the attribute is set before end().
+    const coalesceSpan = tracing.startSpan('coalescing', { trace_id: traceId });
+    let joined;
+    try {
+      joined = await coalescing.joinOrRun(
+        cache.buildCacheKey(scope, payload),
+        async () => {
         let result;
         let failedOver = false;
         let cascaded = false;
@@ -868,21 +902,32 @@ app.post('/v1/chat/completions', async (req, res) => {
             requested_model: requestedModel,
             cache_hit: false,
             quality_score: 0.0,
+            trace_id: traceId,
             error: err.message,
             error_type: metrics.classifyErrorType(err.message)
           });
+
+          // Each provider dispatch attempt - a failover retry or a cascade
+          // escalation - is its own child span, not folded into one, so a
+          // trace visibly shows "escalate to a bigger model" as a distinct
+          // step, not just `cascaded: true` after the fact.
+          const dispatchAttempt = (candidate) => tracing.withSpan(
+            'dispatch',
+            { provider: candidate.provider, model: candidate.model, trace_id: traceId },
+            () => dispatchToProvider(
+              scope,
+              candidate.provider,
+              { ...payload, model: candidate.model },
+              { requestLogprobs: cascade.isEnabled() && candidate.provider === 'openai' }
+            )
+          );
 
           let attempt;
           if (cascade.isEnabled()) {
             attempt = await cascade.tryWithCascade(
               routingDecision.rankedCandidates,
-              (candidate) => dispatchToProvider(
-                scope,
-                candidate.provider,
-                { ...payload, model: candidate.model },
-                { requestLogprobs: candidate.provider === 'openai' }
-              ),
-              buildConfidenceEstimator(scope, payload, requestedModel),
+              dispatchAttempt,
+              buildConfidenceEstimator(scope, payload, requestedModel, traceId),
               {
                 threshold: cascade.threshold(),
                 onAttemptFailed,
@@ -911,6 +956,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                     requested_model: requestedModel,
                     cache_hit: false,
                     quality_score: 0.5,
+                    trace_id: traceId,
                     latency_ms: cheapResult.latency_ms,
                     cost_usd: cheapResult.cost_usd
                   });
@@ -922,7 +968,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           } else {
             attempt = await failover.dispatchWithFailover(
               routingDecision.rankedCandidates,
-              (candidate) => dispatchToProvider(scope, candidate.provider, { ...payload, model: candidate.model }),
+              dispatchAttempt,
               onAttemptFailed
             );
           }
@@ -963,14 +1009,26 @@ app.post('/v1/chat/completions', async (req, res) => {
           cache_hit: false,
           quality_score: failedOver ? 0.5 : 1.0,
           ...(cascaded ? { cascaded: true } : {}),
+          trace_id: traceId,
           latency_ms: result.latency_ms,
           cost_usd: result.cost_usd
         });
 
         return { result, failedOver, cascaded };
+        },
+        traceId
+      );
+    } finally {
+      if (joined) {
+        coalesceSpan.setAttribute('coalescing.role', joined.coalesced ? 'joiner' : 'leader');
+        if (joined.coalesced && joined.joinedTraceId) {
+          coalesceSpan.setAttribute('coalescing.joined_trace_id', joined.joinedTraceId);
+        }
       }
-    );
+      coalesceSpan.end();
+    }
 
+    const { result: dispatchOutcome, coalesced: wasCoalesced, joinedTraceId } = joined;
     const { result, failedOver, cascaded } = dispatchOutcome;
 
     if (wasCoalesced) {
@@ -998,6 +1056,8 @@ app.post('/v1/chat/completions', async (req, res) => {
         coalesced: true,
         quality_score: failedOver ? 0.5 : 1.0,
         ...(cascaded ? { cascaded: true } : {}),
+        trace_id: traceId,
+        ...(joinedTraceId ? { joined_trace_id: joinedTraceId } : {}),
         latency_ms: result.latency_ms,
         cost_usd: 0
       });
@@ -1040,6 +1100,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         requested_model: requestedModel,
         cache_hit: false,
         quality_score: 0.0,
+        trace_id: traceId,
         error: err.message,
         error_type: metrics.classifyErrorType(err.message)
       });
@@ -1058,7 +1119,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     const status = !routingDecision && err.status ? err.status : 502;
     res.status(status).json({ error: err.message });
   }
-});
+}
 
 // Step 14 (ROADMAP.md): metrics.pruneOlderThan() has existed since the
 // day metrics.js was written, but nothing ever actually CALLED it - the
