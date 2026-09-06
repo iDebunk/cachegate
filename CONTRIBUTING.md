@@ -10,13 +10,13 @@ you a round-trip.
 just a marketing caveat: **no login, no billing, no multi-tenant key
 custody, no hosted service** live in this repository, and a PR adding
 any of those will be closed regardless of how well it's built — that
-functionality belongs to a separate, closed product built on top of
-this engine, not this engine itself. This isn't a licensing
-restriction (MIT permits building any of that — see `LICENSE`); it's
-that this repository specifically isn't going to grow into a hosted
-competitor to its own paid product, so a PR heading that direction
-gets closed here regardless of quality, not merged and then diverged
-from later.
+functionality belongs to [Cachegate Cloud](https://cachegate.memocodesystem.com),
+a separate, closed product built on top of this engine, not this
+engine itself. This isn't a licensing restriction (MIT permits
+building any of that — see `LICENSE`); it's that this repository
+specifically isn't going to grow into a hosted competitor to its own
+paid product, so a PR heading that direction gets closed here
+regardless of quality, not merged and then diverged from later.
 
 Everything else — routing strategies, cache behavior, provider
 support, the dashboard, bug fixes — is fair game.
