@@ -94,6 +94,60 @@ test('pickCandidate still returns a candidate when every option is unhealthy', a
   assert.equal(decision.reason.allUnhealthy, true);
 });
 
+// Step 33 (health scoring + circuit breakers) - the "shed" tier, stricter
+// than the existing "unhealthy" filter.
+
+test('pickCandidate sheds a candidate at/above SHED_ERROR_RATE even if it would rank cheapest (33.1)', async () => {
+  const logPath = tempLogPath();
+  const { metrics, router } = freshModules(logPath);
+
+  // openai (cheaper): 9 errors + 1 success = 0.9 error rate -> shed.
+  for (let i = 0; i < 9; i++) metrics.record(null, { provider: 'openai', error: 'down' });
+  metrics.record(null, { provider: 'openai', latency_ms: 100 });
+  // anthropic: healthy (single sample, below MIN_HEALTH_SAMPLES).
+  metrics.record(null, { provider: 'anthropic', latency_ms: 100 });
+  await flush();
+
+  const decision = await router.pickCandidate('router:fast-cheap');
+  assert.equal(decision.provider, 'anthropic'); // openai shed despite being cheaper
+  assert.equal(decision.reason.shedExcludedACandidate, true);
+});
+
+test('pickCandidate falls back to the full list when every candidate is shed (33.2)', async () => {
+  const logPath = tempLogPath();
+  const { metrics, router } = freshModules(logPath);
+
+  for (let i = 0; i < 10; i++) {
+    metrics.record(null, { provider: 'openai', error: 'down' });
+    metrics.record(null, { provider: 'anthropic', error: 'down' });
+  }
+  await flush();
+
+  const decision = await router.pickCandidate('router:fast-cheap');
+  // both shed -> fall back to the full list, pick cheapest (openai)
+  assert.equal(decision.provider, 'openai');
+  assert.equal(decision.reason.shedExcludedACandidate, true);
+  assert.equal(decision.reason.allUnhealthy, true);
+});
+
+test('pickCandidate sheds on very low avgQualityScore even when errorRate is below SHED_ERROR_RATE (33.1)', async () => {
+  const logPath = tempLogPath();
+  const { metrics, router } = freshModules(logPath);
+
+  // openai: 8 failures + 2 failover-successes = errorRate 0.8 (< 0.9), but
+  // avgQualityScore (8*0 + 2*0.5)/10 = 0.1 (< 0.2) -> shed by quality.
+  for (let i = 0; i < 8; i++) metrics.record(null, { provider: 'openai', error: 'down', quality_score: 0.0 });
+  metrics.record(null, { provider: 'openai', quality_score: 0.5, latency_ms: 100 });
+  metrics.record(null, { provider: 'openai', quality_score: 0.5, latency_ms: 100 });
+  // anthropic: healthy.
+  metrics.record(null, { provider: 'anthropic', quality_score: 1.0, latency_ms: 100 });
+  await flush();
+
+  const decision = await router.pickCandidate('router:fast-cheap');
+  assert.equal(decision.provider, 'anthropic');
+  assert.equal(decision.reason.shedExcludedACandidate, true);
+});
+
 // Reliability review (2026-09-02): a Postgres-backed metrics store going
 // down used to turn EVERY router:* request into an unhandled promise
 // rejection (Express 4 never routes those to the error middleware) - a

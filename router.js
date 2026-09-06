@@ -147,6 +147,16 @@ const COMPARISON_OUTPUT_TOKENS = 500;
 // (in which case we still have to pick one - see pickCandidate).
 const UNHEALTHY_ERROR_RATE = 0.5;
 
+// Step 33 (health scoring + circuit breakers): a second, STRICTER tier
+// above "unhealthy" - "shed". A candidate at or above SHED_ERROR_RATE is
+// clearly down (not just having a rough patch), so it's fully excluded
+// this request rather than merely deprioritized. avgQualityScore (step 32)
+// is a second, independent confirming signal: a candidate that keeps
+// needing failover to nominally "succeed" sheds even before its raw
+// error-rate count crosses the threshold. Both thresholds are env-tunable.
+const SHED_ERROR_RATE = Number(process.env.ROUTER_SHED_ERROR_RATE) || 0.9;
+const SHED_QUALITY_SCORE = Number(process.env.ROUTER_SHED_QUALITY_SCORE) || 0.2;
+
 // Minimum number of recent requests before a provider's error rate is
 // treated as meaningful. Without this, a brand-new provider (or one whose
 // traffic just resumed) with a SINGLE request that happened to error has
@@ -205,18 +215,36 @@ async function pickCandidate(virtualModel, scope) {
     const estimatedCostUsd = estimate
       ? estimate(candidate.model, COMPARISON_INPUT_TOKENS, COMPARISON_OUTPUT_TOKENS)
       : Infinity;
-    const providerStat = stats[candidate.provider] || { errorRate: 0, avgLatencyMs: null, sampleSize: 0 };
+    const providerStat = stats[candidate.provider] || { errorRate: 0, avgLatencyMs: null, avgQualityScore: null, sampleSize: 0 };
+    const hasEnoughSamples = providerStat.sampleSize >= MIN_HEALTH_SAMPLES;
+    // shed = clearly down (33.1): high error rate, OR low avgQualityScore
+    // (keeps failing over to "succeed"). avgQualityScore is null when there
+    // is no quality data yet - insufficient data must never shed.
+    const shed =
+      hasEnoughSamples &&
+      (providerStat.errorRate >= SHED_ERROR_RATE ||
+        (typeof providerStat.avgQualityScore === 'number' && providerStat.avgQualityScore < SHED_QUALITY_SCORE));
     return {
       ...candidate,
       estimatedCostUsd,
       errorRate: providerStat.errorRate,
       avgLatencyMs: providerStat.avgLatencyMs,
-      healthy: providerStat.sampleSize < MIN_HEALTH_SAMPLES || providerStat.errorRate < UNHEALTHY_ERROR_RATE
+      avgQualityScore: providerStat.avgQualityScore,
+      shed,
+      healthy: !hasEnoughSamples || providerStat.errorRate < UNHEALTHY_ERROR_RATE
     };
   });
 
-  const healthy = scored.filter((c) => c.healthy);
-  const pool = healthy.length > 0 ? healthy : scored; // all unhealthy: pick the least-bad rather than fail outright
+  // 33.1: shed the clearly-down candidates first (stricter than unhealthy).
+  const notShed = scored.filter((c) => !c.shed);
+  // 33.2: all-down fallback - if every candidate is shed, fall back to the
+  // full list and try anyway (least-bad rather than fail outright), the
+  // same philosophy as the all-unhealthy fallback below.
+  const afterShed = notShed.length > 0 ? notShed : scored;
+  // Existing unhealthy filter (a rough patch, 0.5 <= errorRate < 0.9) on
+  // what remains after shedding.
+  const healthy = afterShed.filter((c) => c.healthy);
+  const pool = healthy.length > 0 ? healthy : afterShed; // all unhealthy: pick the least-bad rather than fail outright
 
   const strategy = loadStrategy();
   let ranked;
@@ -245,6 +273,7 @@ async function pickCandidate(virtualModel, scope) {
       consideredTier: virtualModel,
       strategy,
       candidates: scored,
+      shedExcludedACandidate: notShed.length < scored.length,
       allUnhealthy: healthy.length === 0,
       latencyGuardExcludedACandidate: guardApplied
     }
