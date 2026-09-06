@@ -156,6 +156,28 @@ test('providerStats() only considers the most recent windowSize entries', async 
   assert.equal(stats.openai.avgLatencyMs, 50);
 });
 
+test('providerStats() computes avgQualityScore from entries that HAVE one, excluding cache hits', async () => {
+  const metrics = freshMetrics();
+  metrics.record(null, { provider: 'openai', quality_score: 1.0, latency_ms: 10 });
+  metrics.record(null, { provider: 'openai', quality_score: 0.5, latency_ms: 20 });
+  metrics.record(null, { provider: 'openai', quality_score: 0.0, error: 'boom' });
+  metrics.record(null, { provider: 'openai', cache_hit: true, cache_type: 'exact' }); // no quality_score -> excluded
+  await flush();
+
+  const stats = await metrics.providerStats(null);
+  assert.equal(stats.openai.avgQualityScore, 0.5); // (1.0 + 0.5 + 0.0) / 3, the cache hit excluded
+});
+
+test('providerStats() reports avgQualityScore as null when no entry has one set', async () => {
+  const metrics = freshMetrics();
+  metrics.record(null, { provider: 'openai', latency_ms: 10 });
+  metrics.record(null, { provider: 'openai', cache_hit: true, cache_type: 'exact' });
+  await flush();
+
+  const stats = await metrics.providerStats(null);
+  assert.equal(stats.openai.avgQualityScore, null);
+});
+
 test('classifyErrorType() reads Anthropic\'s own {error:{type}} shape (SDK message = "<status> <json>")', () => {
   const metrics = freshMetrics();
   const msg = '401 {"type":"error","error":{"type":"authentication_error","message":"API key is invalid."},"request_id":null}';

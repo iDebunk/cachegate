@@ -680,3 +680,51 @@ test('with GUARDRAILS_ENABLED=true and the default action (flag), a detected inj
 
   assert.equal(res.status, 200, JSON.stringify(res.body));
 });
+
+// Step 32 (reward-signal instrumentation): a coalesced joiner shares the
+// leader's exact dispatchOutcome (result + failedOver), so it must
+// inherit the leader's quality_score rather than omitting it like a
+// cache hit does - otherwise the busiest, most-coalesced request shapes
+// would be systematically under-sampled in providerStats()'s
+// avgQualityScore, which is the opposite of what a signal meant to feed
+// future routing decisions should do.
+test('a coalesced joiner inherits the leader\'s quality_score, not omitted like a cache hit', async (t) => {
+  const server = await listen();
+  t.after(() => server.close());
+
+  const anthropicProvider = require('../providers/anthropic');
+  const originalBuildClient = anthropicProvider.buildClient;
+  const originalChat = anthropicProvider.chat;
+  let dispatchCount = 0;
+  anthropicProvider.buildClient = () => ({ __fake: true });
+  anthropicProvider.chat = async (client, payload) => {
+    dispatchCount += 1;
+    await new Promise((resolve) => setTimeout(resolve, 30)); // hold the leader open long enough for a joiner to arrive
+    return { provider: 'anthropic', model: payload.model, content: 'ok', usage: { input_tokens: 1, output_tokens: 1 }, cost_usd: 0, latency_ms: 1 };
+  };
+  t.after(() => { anthropicProvider.buildClient = originalBuildClient; anthropicProvider.chat = originalChat; });
+
+  const { configure } = require('../server');
+  t.after(() => configure({ resolveProviderKey: (scope, provider) => (provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY) || null }));
+  configure({ resolveProviderKey: async (scope, provider) => (provider === 'anthropic' ? 'fake-key' : null) });
+
+  const metrics = require('../metrics');
+  const before = await metrics.readRecent(null, 1000);
+
+  const opts = { method: 'POST', path: '/v1/chat/completions', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-internal-key' } };
+  const body = { model: 'claude-haiku-4-5-20251001', messages: [{ role: 'user', content: 'coalesced quality_score test' }] };
+  const [first, second] = await Promise.all([request(server, opts, body), request(server, opts, body)]);
+
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal(dispatchCount, 1, 'both concurrent identical requests must share one upstream dispatch');
+
+  const after = await metrics.readRecent(null, 1000);
+  const newRows = after.slice(before.length);
+  const leaderRow = newRows.find((r) => !r.coalesced);
+  const joinerRow = newRows.find((r) => r.coalesced === true);
+  assert.ok(leaderRow, 'expected a leader metrics row');
+  assert.ok(joinerRow, 'expected a joiner (coalesced: true) metrics row');
+  assert.equal(leaderRow.quality_score, 1.0);
+  assert.equal(joinerRow.quality_score, 1.0, 'the joiner must inherit the leader\'s quality_score, not omit it');
+});

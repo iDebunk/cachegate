@@ -592,6 +592,7 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
       model: payload.model,
       requested_model: requestedModel,
       cache_hit: false,
+      quality_score: 0.0,
       error: err.message,
       error_type: metrics.classifyErrorType(err.message)
     });
@@ -617,6 +618,7 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
     model: result.model,
     requested_model: requestedModel,
     cache_hit: false,
+    quality_score: 1.0,
     latency_ms: result.latency_ms,
     cost_usd: result.cost_usd
   });
@@ -803,6 +805,7 @@ app.post('/v1/chat/completions', async (req, res) => {
               model: candidate.model,
               requested_model: requestedModel,
               cache_hit: false,
+              quality_score: 0.0,
               error: err.message,
               error_type: metrics.classifyErrorType(err.message)
             })
@@ -838,6 +841,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           model: result.model,
           requested_model: requestedModel,
           cache_hit: false,
+          quality_score: failedOver ? 0.5 : 1.0,
           latency_ms: result.latency_ms,
           cost_usd: result.cost_usd
         });
@@ -853,12 +857,23 @@ app.post('/v1/chat/completions', async (req, res) => {
       // (coalesced: true, zero NEW cost) so coalescing is measurable, not
       // just asserted. The leader's record above is the single source of
       // cost for the one upstream call that actually happened.
+      //
+      // quality_score is INHERITED from the leader (failedOver came back
+      // on the same shared dispatchOutcome), not omitted like a cache hit
+      // - a joiner isn't "no independent dispatch happened" in the same
+      // sense a cache hit is; it received the exact same result as the
+      // leader, over the exact same failedOver-or-not path, so its
+      // quality signal is identical, not absent. Omitting it would
+      // systematically under-sample avgQualityScore precisely for the
+      // busiest, most-coalesced request shapes - the opposite of what a
+      // signal meant to feed future routing decisions should do.
       metrics.record(scope, {
         provider: result.provider,
         model: result.model,
         requested_model: requestedModel,
         cache_hit: false,
         coalesced: true,
+        quality_score: failedOver ? 0.5 : 1.0,
         latency_ms: result.latency_ms,
         cost_usd: 0
       });
@@ -899,6 +914,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         model: payload.model,
         requested_model: requestedModel,
         cache_hit: false,
+        quality_score: 0.0,
         error: err.message,
         error_type: metrics.classifyErrorType(err.message)
       });

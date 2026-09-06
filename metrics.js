@@ -106,6 +106,7 @@ async function ensureSchema() {
       );
       ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS scope TEXT;
       ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS coalesced BOOLEAN;
+      ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS quality_score REAL;
       CREATE INDEX IF NOT EXISTS router_metrics_ts_idx ON router_metrics (ts DESC);
       CREATE INDEX IF NOT EXISTS router_metrics_provider_ts_idx ON router_metrics (provider, ts DESC);
       CREATE INDEX IF NOT EXISTS router_metrics_scope_ts_idx ON router_metrics (scope, ts DESC);
@@ -129,6 +130,7 @@ function rowFromPg(dbRow) {
     requested_model: dbRow.requested_model || undefined,
     cache_hit: dbRow.cache_hit === null ? undefined : dbRow.cache_hit,
     coalesced: dbRow.coalesced === null ? undefined : dbRow.coalesced,
+    quality_score: dbRow.quality_score === null ? undefined : dbRow.quality_score,
     cache_type: dbRow.cache_type || undefined,
     latency_ms: dbRow.latency_ms === null ? undefined : dbRow.latency_ms,
     cost_usd: dbRow.cost_usd === null ? undefined : dbRow.cost_usd,
@@ -142,8 +144,8 @@ async function recordToPostgres(scope, entry) {
     await ensureSchema();
     await getPool().query(
       `INSERT INTO router_metrics
-         (scope, provider, model, requested_model, cache_hit, coalesced, cache_type, latency_ms, cost_usd, error, error_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+         (scope, provider, model, requested_model, cache_hit, coalesced, quality_score, cache_type, latency_ms, cost_usd, error, error_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         scope != null ? String(scope) : null,
         entry.provider ?? null,
@@ -151,6 +153,7 @@ async function recordToPostgres(scope, entry) {
         entry.requested_model ?? null,
         entry.cache_hit ?? null,
         entry.coalesced ?? null,
+        entry.quality_score ?? null,
         entry.cache_type ?? null,
         entry.latency_ms ?? null,
         entry.cost_usd ?? null,
@@ -430,6 +433,13 @@ async function providerStats(scope, windowSize = 50) {
     const avgLatencyMs = latencies.length
       ? latencies.reduce((sum, e) => sum + e.latency_ms, 0) / latencies.length
       : null;
+    // Mean quality across entries that actually HAVE a quality_score
+    // (cache hits, coalesced joiners, and pre-this-change rows don't set
+    // one) - same null-tolerant pattern avgLatencyMs uses for latency.
+    const qualityScores = recent.filter((e) => typeof e.quality_score === 'number');
+    const avgQualityScore = qualityScores.length
+      ? qualityScores.reduce((sum, e) => sum + e.quality_score, 0) / qualityScores.length
+      : null;
     // The MOST RECENT error only, not a tally of every type seen in the
     // window - an alert should reflect "what's wrong right now," not a
     // mix that might include something already fixed earlier in the
@@ -442,6 +452,7 @@ async function providerStats(scope, windowSize = 50) {
       sampleSize: recent.length,
       errorRate: recent.length ? errorEntries.length / recent.length : 0,
       avgLatencyMs,
+      avgQualityScore,
       lastErrorType: lastError ? lastError.error_type || classifyErrorType(lastError.error) : null,
       lastErrorAt: lastError ? lastError.timestamp : null
     };
