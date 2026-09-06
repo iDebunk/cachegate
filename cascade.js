@@ -142,8 +142,12 @@ function buildGraderMessages(questionMessages, responseContent) {
  *   hook fired when a low-confidence success is escalated away (the cheap
  *   result's cost is the caller's to record here; it is deliberately NOT
  *   returned - rejecting it is the whole point of cascade). `failedOver` is
- *   true when an earlier candidate in this same walk already errored, so the
- *   caller can record the cheap attempt's quality honestly (0.5, not 1.0).
+ *   true when an earlier candidate in this same walk already errored -
+ *   informational only; the escalated-away candidate's OWN quality_score
+ *   should always be recorded as non-perfect (e.g. 0.5) regardless of
+ *   `failedOver`'s value, since a low-confidence rejection alone already
+ *   disqualifies it from a perfect score - `failedOver` being false doesn't
+ *   make a rejected answer any better.
  * @returns {Promise<{result, candidate, attempts, cascaded, failedOver}>}
  */
 async function tryWithCascade(candidates, dispatch, estimateConfidence, options = {}) {
@@ -171,7 +175,12 @@ async function tryWithCascade(candidates, dispatch, estimateConfidence, options 
       continue; // failover: try the next candidate
     }
 
-    const confidence = await estimateConfidence(result);
+    // Skip confidence estimation entirely on the last candidate: its result
+    // could never change the outcome (there's nowhere left to escalate TO),
+    // so paying for it would be pure waste - and for Anthropic candidates,
+    // that "cost" is a real grader-model API call plus the latency of
+    // waiting on it, not a free computation like OpenAI's logprobs.
+    const confidence = isLastCandidate ? null : await estimateConfidence(result);
     if (typeof confidence === 'number' && confidence < confidenceThreshold && !isLastCandidate) {
       // Low confidence, and a next candidate exists: escalate rather than
       // accept the cheap answer.

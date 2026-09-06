@@ -886,20 +886,31 @@ app.post('/v1/chat/completions', async (req, res) => {
               {
                 threshold: cascade.threshold(),
                 onAttemptFailed,
-                onEscalated: (fromCandidate, toCandidate, cheapResult, failedOverBefore) => {
+                onEscalated: (fromCandidate, toCandidate, cheapResult) => {
                   // The cheap answer is rejected (that's cascade's point),
                   // but its dispatch was a real provider call with real cost
                   // - record it so the spend is never invisible. It is NOT
                   // marked `cascaded`: that flag belongs to the dispatch we
-                  // escalated TO (the final record below). Its quality is
-                  // honest too: 0.5 if an earlier candidate already errored
-                  // (failover) before this cheap success, else 1.0.
+                  // escalated TO (the final record below).
+                  //
+                  // quality_score is ALWAYS 0.5 here, never 1.0 - caught in
+                  // review: the original version scored it 1.0 whenever no
+                  // earlier candidate had failed over, meaning a candidate
+                  // whose answer was just rejected for low confidence still
+                  // got a PERFECT quality score. That directly corrupts the
+                  // exact signal Step 33's shed logic depends on: a provider
+                  // that's frequently escalated past due to low confidence
+                  // would show a misleadingly perfect avgQualityScore instead
+                  // of the "this one needs a second look" signal it should.
+                  // A low-confidence rejection alone already disqualifies a
+                  // perfect score, regardless of whether failover ALSO
+                  // happened earlier in the same walk.
                   metrics.record(scope, {
                     provider: cheapResult.provider,
                     model: cheapResult.model,
                     requested_model: requestedModel,
                     cache_hit: false,
-                    quality_score: failedOverBefore ? 0.5 : 1.0,
+                    quality_score: 0.5,
                     latency_ms: cheapResult.latency_ms,
                     cost_usd: cheapResult.cost_usd
                   });

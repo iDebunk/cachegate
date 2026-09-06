@@ -267,6 +267,29 @@ test('tryWithCascade only escalates when a next candidate actually exists (last 
   assert.equal(outcome.cascaded, true);
 });
 
+// Caught in review: the original version called estimateConfidence on every
+// successful dispatch, including the last candidate - where its result could
+// never influence the outcome (there's nowhere left to escalate to). For the
+// Anthropic path, estimateConfidence is a REAL grader-model API call (real
+// cost, real latency) - calling it on the unescapable last candidate was
+// pure waste on every request that reached it, which happens whenever an
+// earlier candidate needed escalating past or failed over.
+test('tryWithCascade never calls estimateConfidence on the last candidate - its result could never change the outcome', async () => {
+  const candidates = [candidate('openai'), candidate('anthropic')];
+  const confidenceCalls = [];
+  const outcome = await cascade.tryWithCascade(
+    candidates,
+    async (c) => ({ provider: c.provider, content: 'ok' }),
+    async (result) => { confidenceCalls.push(result.provider); return 0.1; }, // always low, if called
+    { threshold: 0.5 }
+  );
+  // openai (not last) gets its confidence checked and escalates; anthropic
+  // (last) must be accepted WITHOUT ever calling estimateConfidence on it.
+  assert.deepEqual(confidenceCalls, ['openai']);
+  assert.equal(outcome.candidate.provider, 'anthropic');
+  assert.equal(outcome.cascaded, true);
+});
+
 test('tryWithCascade calls onEscalated with the cheap result so its cost can be recorded, and discards it from the outcome', async () => {
   const candidates = [candidate('openai'), candidate('anthropic')];
   const escalated = [];
