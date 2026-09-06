@@ -34,6 +34,8 @@ const anthropicProvider = require('./providers/anthropic');
 const openaiProvider = require('./providers/openai');
 const failover = require('./failover');
 const coalescing = require('./coalescing');
+const pii = require('./pii');
+const guardrails = require('./guardrails');
 
 // Status-coded error for config/validation failures inside the dispatch
 // (the /v1 catch below reads err.status to pick the HTTP code, but ONLY
@@ -50,6 +52,33 @@ function httpError(status, message, { skipMetric = false } = {}) {
   err.status = status;
   err.skipMetric = skipMetric;
   return err;
+}
+
+// Applies pii.redact() to every string in a messages array (text content
+// and the `text` field of multimodal content parts), returning a NEW
+// array. Non-string content (images, etc.) passes through untouched. Only
+// called when pii.isEnabled(), so redaction is identity when the flag is
+// off.
+function redactMessages(messages) {
+  return messages.map((m) => {
+    if (!m || typeof m !== 'object') return m;
+    if (typeof m.content === 'string') {
+      return { ...m, content: pii.redact(m.content).text };
+    }
+    if (Array.isArray(m.content)) {
+      return {
+        ...m,
+        content: m.content.map((part) => {
+          if (typeof part === 'string') return pii.redact(part).text;
+          if (part && typeof part === 'object' && typeof part.text === 'string') {
+            return { ...part, text: pii.redact(part.text).text };
+          }
+          return part;
+        })
+      };
+    }
+    return m;
+  });
 }
 
 const app = express();
@@ -638,6 +667,25 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.status(400).json({ error: routingDecision.error });
     }
     payload.model = routingDecision.model;
+  }
+
+  // Step 25 (joint wiring): PII redaction + injection policy run BEFORE
+  // the cache lookup, so redacted content is what gets cached (never raw
+  // PII) and a blocked request never reaches a provider or a cache write.
+  // Both modules are gated off by default, so this is a no-op unless the
+  // deployment opts in.
+  if (pii.isEnabled()) {
+    payload.messages = redactMessages(payload.messages);
+  }
+  const policy = guardrails.evaluate(payload.messages);
+  if (policy.decision === 'block') {
+    return res.status(403).json({ error: 'Request blocked by content policy.' });
+  }
+  if (policy.decision !== 'allow') {
+    // flag/log: pass through but record the detection. Console for now - a
+    // dedicated metric column is a possible follow-up (same as the
+    // coalesced column step 24 added).
+    console.warn(`[guardrails] ${policy.decision}: ${policy.reasons.join(', ')}`);
   }
 
   // 1. Try the exact-match cache first - free, zero-risk, checked
