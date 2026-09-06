@@ -166,6 +166,40 @@ test('POST /v1/chat/completions with an unsupported model name returns 400', asy
   assert.equal(res.status, 400);
 });
 
+// Regression coverage for a bug introduced (and caught in review) while
+// wrapping this dispatch in step 24's coalescing.joinOrRun(): the
+// explicit-model "not configured"/"unsupported model" checks used to be
+// a plain `return res.status(...)`, with no metrics.record() call at
+// all. Wrapping them in a try/catch so coalescing could work meant they
+// now THROW - and without the httpError()/skipMetric fix, that made
+// them land in the shared catch block, which DOES call metrics.record(),
+// polluting the Provider alerts table with static misconfiguration
+// noise every time this ran (found via a LATER dashboard test
+// unexpectedly seeing an extra alert - a real, reproducible failure,
+// not a hypothetical one). Locking in the restored behavior directly.
+test('a pre-dispatch validation failure (missing key, unsupported model) never touches metrics - same as before coalescing wrapped the dispatch', async (t) => {
+  const server = await listen();
+  t.after(() => server.close());
+  const metrics = require('../metrics');
+
+  const before = await metrics.readRecent(null, 1000);
+
+  await request(
+    server,
+    { method: 'POST', path: '/v1/chat/completions', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-internal-key' } },
+    { model: 'llama-3-70b', messages: [{ role: 'user', content: 'hi' }] }
+  );
+  await request(
+    server,
+    { method: 'POST', path: '/v1/chat/completions', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-internal-key' } },
+    { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }] } // no OPENAI_API_KEY set in this suite
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50)); // let the write stream flush if either wrote
+
+  const after = await metrics.readRecent(null, 1000);
+  assert.equal(after.length, before.length, 'neither request should have written a metrics record');
+});
+
 test('POST /v1/chat/completions with a body over JSON_BODY_LIMIT returns a clean JSON error, not a stack trace', async (t) => {
   const server = await listen();
   t.after(() => server.close());

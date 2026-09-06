@@ -36,11 +36,19 @@ const failover = require('./failover');
 const coalescing = require('./coalescing');
 
 // Status-coded error for config/validation failures inside the dispatch
-// (the /v1 catch below reads err.status to pick the HTTP code; provider
-// failures carry no status and default to 502).
-function httpError(status, message) {
+// (the /v1 catch below reads err.status to pick the HTTP code, but ONLY
+// on the explicit-model path - see that catch's own comment on why the
+// virtual-model/failover path never honors it). skipMetric marks a
+// pre-dispatch validation failure (missing key, unsupported model) that
+// never actually reached a provider - the ORIGINAL inline
+// `return res.status(...)` code never called metrics.record() for these
+// either, so this restores that (a static misconfiguration isn't a live
+// provider-health signal; it shouldn't pollute the Provider alerts table
+// the same way a real dispatch failure does).
+function httpError(status, message, { skipMetric = false } = {}) {
   const err = new Error(message);
   err.status = status;
+  err.skipMetric = skipMetric;
   return err;
 }
 
@@ -759,16 +767,16 @@ app.post('/v1/chat/completions', async (req, res) => {
           }
         } else if (isModelAnthropic(payload.model)) {
           if (!(await seams.resolveProviderKey(scope, 'anthropic'))) {
-            throw httpError(500, 'ANTHROPIC_API_KEY not configured');
+            throw httpError(500, 'ANTHROPIC_API_KEY not configured', { skipMetric: true });
           }
           result = await anthropicProvider.chat(await getAnthropicClient(scope), payload);
         } else if (isModelOpenAi(payload.model)) {
           if (!(await seams.resolveProviderKey(scope, 'openai'))) {
-            throw httpError(500, 'OPENAI_API_KEY not configured');
+            throw httpError(500, 'OPENAI_API_KEY not configured', { skipMetric: true });
           }
           result = await openaiProvider.chat(await getOpenAiClient(scope), payload);
         } else {
-          throw httpError(400, `Unsupported model: ${payload.model}`);
+          throw httpError(400, `Unsupported model: ${payload.model}`, { skipMetric: true });
         }
 
         // Store in both caches - exact-match for identical future
@@ -828,11 +836,16 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ Model router error:', err.message);
-    if (!routingDecision) {
+    if (!routingDecision && !err.skipMetric) {
       // Virtual-model attempts already record one metrics entry PER
       // candidate as each fails (see the onAttemptFailed callback
       // above), including whichever one was last - recording again
-      // here would double-count it.
+      // here would double-count it. skipMetric is the OTHER exclusion:
+      // a pre-dispatch validation failure (missing key, unsupported
+      // model - see httpError()'s own comment) never reached a
+      // provider at all, so recording it here would be new behavior,
+      // not a restoration - the original inline `return res.status(...)`
+      // code never touched metrics for these either.
       metrics.record(scope, {
         provider: isModelAnthropic(payload.model) ? 'anthropic' : 'openai',
         model: payload.model,
@@ -842,7 +855,19 @@ app.post('/v1/chat/completions', async (req, res) => {
         error_type: metrics.classifyErrorType(err.message)
       });
     }
-    res.status(err.status || 502).json({ error: err.message });
+    // err.status is only honored on the explicit-model path (where it
+    // can ONLY come from this file's own httpError() calls above - a
+    // deliberate 500/400 for a config/validation failure). The virtual-
+    // model/failover path always falls back to 502 regardless of
+    // err.status: dispatchToProvider() sets .status=500 on ITS OWN
+    // thrown errors too, but only for failover.isRetryableError()'s
+    // internal retry decision - that was never meant to reach the
+    // client as the final status once every candidate is exhausted
+    // (see the dedicated test for this exact contract: exhausted
+    // failover -> 502, always, whatever the last candidate's own
+    // error looked like).
+    const status = !routingDecision && err.status ? err.status : 502;
+    res.status(status).json({ error: err.message });
   }
 });
 
