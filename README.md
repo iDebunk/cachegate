@@ -318,6 +318,23 @@ auth, for local development only.
   provider fallback), and the metrics store. They don't call a real
   provider API - that needs live keys and real spend, out of scope for
   this suite.
+- **Guardrails - PII redaction and prompt-injection detection**, both
+  off by default (opt-in, zero behavior change until you set an env
+  var). Runs pre-dispatch, before either cache lookup, so redacted
+  content is what gets cached and a blocked request never reaches a
+  provider:
+  - `GUARDRAILS_PII_REDACTION=true` - pattern-based detection +
+    redaction for emails, phone numbers, SSNs, credit card numbers
+    (shape + Luhn checksum), and common vendor API-key/secret shapes
+    (`pii.js`). Never surfaces the actual matched value anywhere, even
+    internally - only a `{type, count}` summary.
+  - `GUARDRAILS_ENABLED=true` - heuristic prompt-injection detection
+    (instruction-override, system-prompt-leak, role-play jailbreak,
+    "developer mode", DAN, "no restrictions" framing - `guardrails.js`).
+    Default action on a hit is `flag` (logged, request still proceeds) -
+    heuristics false-positive, so auto-blocking real traffic isn't the
+    default. Set `GUARDRAILS_INJECTION_ACTION=block` to reject a
+    detected attempt with `403` instead.
 
 ## Two kinds of cache hit - why they're reported separately
 
@@ -359,6 +376,99 @@ assumed (most self-hosted Redis, including Render's managed Redis,
 doesn't have one). That's fine at single-instance, self-hosted volume;
 it is not built to scale past that cap. See `semanticCache.js` for the
 full reasoning.
+
+## Provider prompt caching + Cachegate's own cache - compounding, not fighting
+
+Anthropic and OpenAI both have their own prompt-caching feature,
+separate from anything in this project - a KV-cache the provider
+itself keeps for a repeated, unchanging prefix (a long system prompt,
+a set of few-shot examples, a big shared document) so it doesn't get
+reprocessed on every call. It's easy to assume that overlaps with
+Cachegate's own exact/semantic cache and picking one means giving up
+the other. It doesn't - they solve different problems, and used
+together they compound:
+
+- **Cachegate's cache is checked FIRST, before any provider is ever
+  called.** An exact or semantic hit costs `$0` and involves the
+  provider not at all - strictly better than even a heavily-discounted
+  cached-prefix rate, because there's no completion call at all.
+- **Provider-level prompt caching only ever matters on a genuine
+  Cachegate miss** - a request different enough (in its varying tail)
+  that it doesn't match anything cached, but sharing a long, unchanging
+  prefix (system prompt, few-shot examples) with other misses that came
+  before it. That's the case Cachegate's own cache structurally can't
+  help with - the *tail* differs, so the request as a whole is a miss -
+  but the provider's own cache can still skip reprocessing the shared
+  *prefix*, cutting cost and latency on every one of those misses.
+
+**This already works transparently - no cachegate code change
+needed.** `providers/anthropic.js` and `providers/openai.js` both
+forward your `messages`/`system`/`tools` fields through to the
+provider's SDK as-is; neither reshapes message content or strips
+unrecognized properties from it. Concretely:
+
+- **Anthropic**: mark the unchanging part with
+  `cache_control: {"type": "ephemeral"}`, same as you would calling
+  Anthropic directly - on the system prompt, on a tool definition, or
+  on a specific content block within `messages`. Whatever object you
+  put there reaches `client.messages.create()` unchanged.
+
+  ```bash
+  curl http://localhost:4000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer your-random-internal-key" \
+    -d '{
+      "model": "claude-sonnet-4-5-20250929",
+      "max_tokens": 1024,
+      "messages": [
+        {
+          "role": "system",
+          "content": [
+            {
+              "type": "text",
+              "text": "<...your long, unchanging system prompt / few-shot examples...>",
+              "cache_control": {"type": "ephemeral"}
+            }
+          ]
+        },
+        {"role": "user", "content": "This part changes on every call."}
+      ]
+    }'
+  ```
+
+  Anthropic's own docs are the source of truth for the minimum
+  cacheable prompt length (model-dependent) and the 5-minute default
+  TTL - this project doesn't set or override either.
+
+- **OpenAI**: fully automatic, no request changes at all. Once a
+  prompt's shared prefix is long enough (OpenAI's own current
+  threshold; see their docs, not repeated here since it's a number
+  they control and could change), OpenAI caches it on their side by
+  default - the exact same `messages` array you're already sending
+  through `providers/openai.js` unmodified is what makes this work, or
+  not, entirely on their end.
+
+**One thing worth watching, specific to Cachegate's own exact cache:**
+`cache.buildCacheKey()` hashes your `messages` (and `tools`) as given -
+a `cache_control` block is just another property on a content object,
+and it participates in that hash like anything else. Two requests that
+are otherwise identical but differ only in whether `cache_control` is
+present will land in **different** Cachegate exact-cache entries -
+Cachegate doesn't know the extra field is caching metadata, it's just
+part of the request shape. Not a bug, just a consequence of exact
+meaning exact: keep `cache_control` usage *consistent* across calls
+for the same logical prompt (always include it, or never) rather than
+sometimes adding it, or you'll needlessly fragment Cachegate's own
+cache into two variants of what should be one entry.
+
+**If `GUARDRAILS_PII_REDACTION` is on** (see "Features" above): PII
+redaction only ever rewrites a content block's `text` field in place -
+`cache_control` and every other property on that block pass through
+untouched. Redaction changing the *text* of a normally-stable shared
+prefix would still be an unusual thing to have happen (a system prompt
+containing PII isn't a common shape), but if it ever does, the
+redacted version is what both Cachegate's cache key and the provider's
+own cache lookup see - consistently, on every call, not just some.
 
 ## Streaming
 
