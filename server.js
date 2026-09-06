@@ -34,6 +34,7 @@ const anthropicProvider = require('./providers/anthropic');
 const openaiProvider = require('./providers/openai');
 const failover = require('./failover');
 const coalescing = require('./coalescing');
+const cascade = require('./cascade');
 const pii = require('./pii');
 const guardrails = require('./guardrails');
 
@@ -525,7 +526,10 @@ function streamCachedReplay(res, entry, cacheType) {
 // against more than one provider in the same request. Throws an error
 // with `.status` set so failover.isRetryableError() can decide whether
 // it's worth trying the next candidate.
-async function dispatchToProvider(scope, provider, payload) {
+// `options` is provider-specific dispatch hints (cascade routing, step 34).
+// It reaches only providers/openai.js today (requestLogprobs); Anthropic
+// ignores it. Kept backward-compatible - existing callers pass no options.
+async function dispatchToProvider(scope, provider, payload, options = {}) {
   if (provider === 'anthropic') {
     if (!(await seams.resolveProviderKey(scope, 'anthropic'))) {
       throw Object.assign(new Error('ANTHROPIC_API_KEY not configured'), { status: 500 });
@@ -535,7 +539,61 @@ async function dispatchToProvider(scope, provider, payload) {
   if (!(await seams.resolveProviderKey(scope, 'openai'))) {
     throw Object.assign(new Error('OPENAI_API_KEY not configured'), { status: 500 });
   }
-  return openaiProvider.chat(await getOpenAiClient(scope), payload);
+  return openaiProvider.chat(await getOpenAiClient(scope), payload, options);
+}
+
+// Step 34 (cascade routing): per-provider confidence estimation. OpenAI's
+// path is pure (cascade.openaiLogprobConfidence over the logprobs the
+// dispatch asked for). Anthropic has no native logprobs, so its confidence
+// comes from a grader model - one bounded extra request to a small/cheap
+// model asking "does this response fully and confidently answer the
+// question? reply with a number 0-1" (Claude's recommendation over
+// self-consistency, which multiplies cost 2-3x on every cheap-tier dispatch
+// and works directly against cascade's own cheap-first reason to exist).
+//
+// The grader is opt-in (CASCADE_GRADER_MODEL): unset means Anthropic
+// candidates return null confidence - fail-open, no escalation, the same
+// "insufficient data must never escalate" discipline as everywhere else.
+// The grader's own provider call is recorded like any other real dispatch so
+// its cost is never invisible.
+function buildConfidenceEstimator(scope, payload, requestedModel) {
+  return async (result) => {
+    if (!result) return null;
+    if (result.provider === 'openai') return cascade.openaiLogprobConfidence(result);
+    if (result.provider === 'anthropic') return graderConfidence(scope, payload, requestedModel, result);
+    return null;
+  };
+}
+
+async function graderConfidence(scope, payload, requestedModel, result) {
+  const graderModel = process.env.CASCADE_GRADER_MODEL;
+  if (!graderModel) return null; // no grader configured -> no signal -> fail open
+  const graderProvider = isModelAnthropic(graderModel) ? 'anthropic' : (isModelOpenAi(graderModel) ? 'openai' : null);
+  if (!graderProvider) return null;
+  try {
+    const grade = await dispatchToProvider(scope, graderProvider, {
+      model: graderModel,
+      messages: cascade.buildGraderMessages(payload.messages, result.content),
+      temperature: 0,
+      max_tokens: 8 // the grader only needs to emit a single 0-1 number
+    });
+    metrics.record(scope, {
+      provider: grade.provider,
+      model: grade.model,
+      requested_model: requestedModel,
+      cache_hit: false,
+      quality_score: 1.0,
+      latency_ms: grade.latency_ms,
+      cost_usd: grade.cost_usd
+    });
+    return cascade.parseGraderScore(grade.content);
+  } catch (err) {
+    // A grader failure (missing key, provider down) must never fail the
+    // request being graded - treat it as "no confidence signal" and accept
+    // the candidate's answer (fail-open).
+    console.warn('⚠️ Cascade grader failed, accepting candidate without a confidence signal:', err.message);
+    return null;
+  }
 }
 
 // The real streaming dispatch path: an actual cache miss, forwarded
@@ -786,6 +844,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       async () => {
         let result;
         let failedOver = false;
+        let cascaded = false;
 
         if (routingDecision) {
           // Virtual model: try the ranked candidates in order (router.js's
@@ -797,22 +856,79 @@ app.post('/v1/chat/completions', async (req, res) => {
           // non-failed-over error would be (below), so failover keeps the
           // request succeeding without hiding the underlying provider
           // problem from the Provider alerts table.
-          const attempt = await failover.dispatchWithFailover(
-            routingDecision.rankedCandidates,
-            (candidate) => dispatchToProvider(scope, candidate.provider, { ...payload, model: candidate.model }),
-            (candidate, err) => metrics.record(scope, {
-              provider: candidate.provider,
-              model: candidate.model,
-              requested_model: requestedModel,
-              cache_hit: false,
-              quality_score: 0.0,
-              error: err.message,
-              error_type: metrics.classifyErrorType(err.message)
-            })
-          );
+          //
+          // Step 34 (cascade routing): when CASCADE_ENABLED, the same walk
+          // ALSO escalates on a successful-but-low-confidence response -
+          // orthogonal to failover (which retries on ERROR). The default
+          // (cascade off) stays on failover.dispatchWithFailover, byte-
+          // identical to before cascade existed.
+          const onAttemptFailed = (candidate, err) => metrics.record(scope, {
+            provider: candidate.provider,
+            model: candidate.model,
+            requested_model: requestedModel,
+            cache_hit: false,
+            quality_score: 0.0,
+            error: err.message,
+            error_type: metrics.classifyErrorType(err.message)
+          });
+
+          let attempt;
+          if (cascade.isEnabled()) {
+            attempt = await cascade.tryWithCascade(
+              routingDecision.rankedCandidates,
+              (candidate) => dispatchToProvider(
+                scope,
+                candidate.provider,
+                { ...payload, model: candidate.model },
+                { requestLogprobs: candidate.provider === 'openai' }
+              ),
+              buildConfidenceEstimator(scope, payload, requestedModel),
+              {
+                threshold: cascade.threshold(),
+                onAttemptFailed,
+                onEscalated: (fromCandidate, toCandidate, cheapResult) => {
+                  // The cheap answer is rejected (that's cascade's point),
+                  // but its dispatch was a real provider call with real cost
+                  // - record it so the spend is never invisible. It is NOT
+                  // marked `cascaded`: that flag belongs to the dispatch we
+                  // escalated TO (the final record below).
+                  //
+                  // quality_score is ALWAYS 0.5 here, never 1.0 - caught in
+                  // review: the original version scored it 1.0 whenever no
+                  // earlier candidate had failed over, meaning a candidate
+                  // whose answer was just rejected for low confidence still
+                  // got a PERFECT quality score. That directly corrupts the
+                  // exact signal Step 33's shed logic depends on: a provider
+                  // that's frequently escalated past due to low confidence
+                  // would show a misleadingly perfect avgQualityScore instead
+                  // of the "this one needs a second look" signal it should.
+                  // A low-confidence rejection alone already disqualifies a
+                  // perfect score, regardless of whether failover ALSO
+                  // happened earlier in the same walk.
+                  metrics.record(scope, {
+                    provider: cheapResult.provider,
+                    model: cheapResult.model,
+                    requested_model: requestedModel,
+                    cache_hit: false,
+                    quality_score: 0.5,
+                    latency_ms: cheapResult.latency_ms,
+                    cost_usd: cheapResult.cost_usd
+                  });
+                  console.warn(`⚠️ Model router cascade: ${fromCandidate.provider}/${fromCandidate.model} answered with low confidence, escalating to ${toCandidate.provider}/${toCandidate.model}`);
+                }
+              }
+            );
+            cascaded = attempt.cascaded;
+          } else {
+            attempt = await failover.dispatchWithFailover(
+              routingDecision.rankedCandidates,
+              (candidate) => dispatchToProvider(scope, candidate.provider, { ...payload, model: candidate.model }),
+              onAttemptFailed
+            );
+          }
           result = attempt.result;
-          failedOver = attempt.attempts > 1;
-          payload.model = result.model; // the candidate that actually served it, if failover moved past the first choice
+          failedOver = attempt.failedOver !== undefined ? attempt.failedOver : attempt.attempts > 1;
+          payload.model = result.model; // the candidate that actually served it, if failover/cascade moved past the first choice
           if (failedOver) {
             console.warn(`⚠️ Model router failover: ${routingDecision.provider}/${routingDecision.model} unavailable, served by ${attempt.candidate.provider}/${attempt.candidate.model} instead (attempt ${attempt.attempts}/${routingDecision.rankedCandidates.length})`);
           }
@@ -833,6 +949,10 @@ app.post('/v1/chat/completions', async (req, res) => {
         // Store in both caches - exact-match for identical future
         // requests, semantic for near-duplicate ones. Both no-op quietly if
         // their prerequisites (Redis / OPENAI_API_KEY) aren't configured.
+        // Cascade (step 34): only the response that PASSES confidence gets
+        // cached. A rejected low-confidence answer was already escalated
+        // away inside tryWithCascade, so `result` here is always the final
+        // accepted response - never the cheap one we threw away.
         await cache.set(scope, payload, result);
         await semanticCache.store(scope, payload, result);
 
@@ -842,15 +962,16 @@ app.post('/v1/chat/completions', async (req, res) => {
           requested_model: requestedModel,
           cache_hit: false,
           quality_score: failedOver ? 0.5 : 1.0,
+          ...(cascaded ? { cascaded: true } : {}),
           latency_ms: result.latency_ms,
           cost_usd: result.cost_usd
         });
 
-        return { result, failedOver };
+        return { result, failedOver, cascaded };
       }
     );
 
-    const { result, failedOver } = dispatchOutcome;
+    const { result, failedOver, cascaded } = dispatchOutcome;
 
     if (wasCoalesced) {
       // Joiner: shared the leader's upstream call - record it distinctly
@@ -866,7 +987,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       // quality signal is identical, not absent. Omitting it would
       // systematically under-sample avgQualityScore precisely for the
       // busiest, most-coalesced request shapes - the opposite of what a
-      // signal meant to feed future routing decisions should do.
+      // signal meant to feed future routing decisions should do. `cascaded`
+      // inherits for the exact same reason: a joiner received the
+      // escalated result, so it must be visible as escalated too.
       metrics.record(scope, {
         provider: result.provider,
         model: result.model,
@@ -874,6 +997,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         cache_hit: false,
         coalesced: true,
         quality_score: failedOver ? 0.5 : 1.0,
+        ...(cascaded ? { cascaded: true } : {}),
         latency_ms: result.latency_ms,
         cost_usd: 0
       });
@@ -886,6 +1010,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       model: result.model,
       routed_from: routingDecision ? requestedModel : undefined,
       failover: failedOver ? true : undefined,
+      cascaded: cascaded ? true : undefined,
       latency_ms: result.latency_ms,
       usage: result.usage,
       cost_usd: result.cost_usd,
