@@ -592,6 +592,7 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
       model: payload.model,
       requested_model: requestedModel,
       cache_hit: false,
+      quality_score: 0.0,
       error: err.message,
       error_type: metrics.classifyErrorType(err.message)
     });
@@ -617,6 +618,7 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
     model: result.model,
     requested_model: requestedModel,
     cache_hit: false,
+    quality_score: 1.0,
     latency_ms: result.latency_ms,
     cost_usd: result.cost_usd
   });
@@ -803,6 +805,7 @@ app.post('/v1/chat/completions', async (req, res) => {
               model: candidate.model,
               requested_model: requestedModel,
               cache_hit: false,
+              quality_score: 0.0,
               error: err.message,
               error_type: metrics.classifyErrorType(err.message)
             })
@@ -838,6 +841,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           model: result.model,
           requested_model: requestedModel,
           cache_hit: false,
+          quality_score: failedOver ? 0.5 : 1.0,
           latency_ms: result.latency_ms,
           cost_usd: result.cost_usd
         });
@@ -899,6 +903,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         model: payload.model,
         requested_model: requestedModel,
         cache_hit: false,
+        quality_score: 0.0,
         error: err.message,
         error_type: metrics.classifyErrorType(err.message)
       });
