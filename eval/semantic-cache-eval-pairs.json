@@ -1,0 +1,28 @@
+[
+  { "a": "Summarize this document for me", "b": "Can you give me a summary of this document?", "expectMatch": true, "note": "paraphrase" },
+  { "a": "What's the capital of France?", "b": "Tell me the capital city of France", "expectMatch": true, "note": "paraphrase" },
+  { "a": "Translate this sentence to Spanish", "b": "Please translate this sentence into Spanish", "expectMatch": true, "note": "paraphrase" },
+  { "a": "How do I reverse a list in Python?", "b": "What's the Python way to reverse a list?", "expectMatch": true, "note": "paraphrase" },
+  { "a": "Explain quantum entanglement simply", "b": "Can you explain quantum entanglement in simple terms?", "expectMatch": true, "note": "paraphrase" },
+  { "a": "Write a haiku about autumn", "b": "Compose a haiku on the theme of autumn", "expectMatch": true, "note": "paraphrase" },
+  { "a": "What are the health benefits of green tea?", "b": "Tell me about the health benefits of drinking green tea", "expectMatch": true, "note": "paraphrase" },
+  { "a": "Fix this bug in my code", "b": "Can you help me fix this bug in my code?", "expectMatch": true, "note": "paraphrase" },
+  { "a": "Give me a recipe for chocolate chip cookies", "b": "What's a good chocolate chip cookie recipe?", "expectMatch": true, "note": "paraphrase" },
+  { "a": "Explain the difference between TCP and UDP", "b": "What's the difference between TCP and UDP protocols?", "expectMatch": true, "note": "paraphrase" },
+
+  { "a": "What is 15% of 200?", "b": "What is 25% of 900?", "expectMatch": false, "note": "same template, different number - the exact failure mode Step 21 caught on the literal-cache side" },
+  { "a": "Summarize invoice #12345, total $500", "b": "Summarize invoice #67890, total $9000", "expectMatch": false, "note": "same template, different value" },
+  { "a": "What happened on 2024-01-15?", "b": "What happened on 2024-03-22?", "expectMatch": false, "note": "same template, different date" },
+  { "a": "Convert 100 USD to EUR", "b": "Convert 500 USD to EUR", "expectMatch": false, "note": "same template, different amount" },
+  { "a": "What's the population of Canada?", "b": "What's the population of Brazil?", "expectMatch": false, "note": "same template, different subject" },
+  { "a": "Summarize the plot of Romeo and Juliet", "b": "Summarize the plot of Hamlet", "expectMatch": false, "note": "same template, different subject" },
+  { "a": "How many calories are in a banana?", "b": "How many calories are in an avocado?", "expectMatch": false, "note": "same template, different subject" },
+  { "a": "What year did World War II end?", "b": "What year did World War I end?", "expectMatch": false, "note": "same template, different subject" },
+
+  { "a": "Summarize this document for me", "b": "Translate this sentence to Spanish", "expectMatch": false, "note": "unrelated" },
+  { "a": "What's the capital of France?", "b": "Write a haiku about autumn", "expectMatch": false, "note": "unrelated" },
+  { "a": "Fix this bug in my code", "b": "Give me a recipe for chocolate chip cookies", "expectMatch": false, "note": "unrelated" },
+  { "a": "Explain quantum entanglement simply", "b": "What's the difference between TCP and UDP protocols?", "expectMatch": false, "note": "unrelated" },
+  { "a": "How do I reverse a list in Python?", "b": "What are the health benefits of green tea?", "expectMatch": false, "note": "unrelated" },
+  { "a": "What is 15% of 200?", "b": "Summarize the plot of Romeo and Juliet", "expectMatch": false, "note": "unrelated" }
+]

@@ -26,7 +26,8 @@
   },
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "eval:semantic-cache": "node eval/semantic-cache-eval.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
