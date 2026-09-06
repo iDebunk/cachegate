@@ -86,3 +86,26 @@ test("the leader's failure is propagated to joiners (no false success)", async (
   await assert.rejects(leader, /upstream exploded/);
   await assert.rejects(joiner, /upstream exploded/);
 });
+
+// Step 36 (trace_id correlation): a joiner must be able to record BOTH its
+// own trace_id and the leader's trace_id it shared a dispatch with. The
+// leader gets no joinedTraceId (it dispatched itself); joiners get the
+// leader's traceId back as joinedTraceId.
+test('joinOrRun returns the leader\'s traceId to joiners as joinedTraceId, and none to the leader', async () => {
+  const c = freshCoalescing();
+  const dispatch = async () => {
+    await new Promise((r) => setTimeout(r, 20));
+    return { answer: 42 };
+  };
+  const results = await Promise.all([
+    c.joinOrRun('key-1', dispatch, 'trace-leader'),
+    c.joinOrRun('key-1', dispatch, 'trace-joiner-a'),
+    c.joinOrRun('key-1', dispatch, 'trace-joiner-b')
+  ]);
+  const leader = results.find((r) => r.coalesced === false);
+  const joiners = results.filter((r) => r.coalesced === true);
+  assert.equal(leader.joinedTraceId, undefined, 'the leader must not carry joinedTraceId');
+  assert.equal(joiners.length, 2);
+  assert.equal(joiners[0].joinedTraceId, 'trace-leader');
+  assert.equal(joiners[1].joinedTraceId, 'trace-leader');
+});

@@ -108,6 +108,8 @@ async function ensureSchema() {
       ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS coalesced BOOLEAN;
       ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS quality_score REAL;
       ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS cascaded BOOLEAN;
+      ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS trace_id TEXT;
+      ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS joined_trace_id TEXT;
       CREATE INDEX IF NOT EXISTS router_metrics_ts_idx ON router_metrics (ts DESC);
       CREATE INDEX IF NOT EXISTS router_metrics_provider_ts_idx ON router_metrics (provider, ts DESC);
       CREATE INDEX IF NOT EXISTS router_metrics_scope_ts_idx ON router_metrics (scope, ts DESC);
@@ -133,6 +135,8 @@ function rowFromPg(dbRow) {
     coalesced: dbRow.coalesced === null ? undefined : dbRow.coalesced,
     cascaded: dbRow.cascaded === null ? undefined : dbRow.cascaded,
     quality_score: dbRow.quality_score === null ? undefined : dbRow.quality_score,
+    trace_id: dbRow.trace_id || undefined,
+    joined_trace_id: dbRow.joined_trace_id || undefined,
     cache_type: dbRow.cache_type || undefined,
     latency_ms: dbRow.latency_ms === null ? undefined : dbRow.latency_ms,
     cost_usd: dbRow.cost_usd === null ? undefined : dbRow.cost_usd,
@@ -146,8 +150,8 @@ async function recordToPostgres(scope, entry) {
     await ensureSchema();
     await getPool().query(
       `INSERT INTO router_metrics
-         (scope, provider, model, requested_model, cache_hit, coalesced, cascaded, quality_score, cache_type, latency_ms, cost_usd, error, error_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+         (scope, provider, model, requested_model, cache_hit, coalesced, cascaded, quality_score, cache_type, latency_ms, cost_usd, error, error_type, trace_id, joined_trace_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
       [
         scope != null ? String(scope) : null,
         entry.provider ?? null,
@@ -161,7 +165,9 @@ async function recordToPostgres(scope, entry) {
         entry.latency_ms ?? null,
         entry.cost_usd ?? null,
         entry.error ?? null,
-        entry.error_type ?? null
+        entry.error_type ?? null,
+        entry.trace_id ?? null,
+        entry.joined_trace_id ?? null
       ]
     );
   } catch (err) {

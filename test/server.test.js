@@ -36,7 +36,7 @@ function request(server, options, body) {
         res.on('end', () => {
           let parsed;
           try { parsed = JSON.parse(data); } catch { parsed = data; }
-          resolve({ status: res.statusCode, body: parsed });
+          resolve({ status: res.statusCode, headers: res.headers, body: parsed });
         });
       }
     );
@@ -727,4 +727,94 @@ test('a coalesced joiner inherits the leader\'s quality_score, not omitted like 
   assert.ok(joinerRow, 'expected a joiner (coalesced: true) metrics row');
   assert.equal(leaderRow.quality_score, 1.0);
   assert.equal(joinerRow.quality_score, 1.0, 'the joiner must inherit the leader\'s quality_score, not omit it');
+});
+
+// Step 36 (observability): the trace_id correlation itself, driven through
+// the real route handler rather than only unit-tested in isolation
+// (tracing.js's own no-op-safety tests and coalescing.js's joinedTraceId
+// test don't prove server.js actually wires trace_id into a real request's
+// response header AND its metrics rows - this does).
+test('a request gets a stable X-Cachegate-Trace-Id that also appears on its own metrics row', async (t) => {
+  const server = await listen();
+  t.after(() => server.close());
+
+  // A missing-key config error is validated BEFORE any metrics.record() call
+  // (Step 24's own fix - config errors must never pollute metrics), so this
+  // needs a real dispatch to reach a row at all. Stub the provider rather
+  // than relying on a real API key.
+  const anthropicProvider = require('../providers/anthropic');
+  const originalBuildClient = anthropicProvider.buildClient;
+  const originalChat = anthropicProvider.chat;
+  anthropicProvider.buildClient = () => ({ __fake: true });
+  anthropicProvider.chat = async (client, payload) => ({
+    provider: 'anthropic', model: payload.model, content: 'ok', usage: { input_tokens: 1, output_tokens: 1 }, cost_usd: 0, latency_ms: 1
+  });
+  t.after(() => { anthropicProvider.buildClient = originalBuildClient; anthropicProvider.chat = originalChat; });
+
+  const { configure } = require('../server');
+  t.after(() => configure({ resolveProviderKey: (scope, provider) => (provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY) || null }));
+  configure({ resolveProviderKey: async (scope, provider) => (provider === 'anthropic' ? 'fake-key' : null) });
+
+  const metrics = require('../metrics');
+  const before = await metrics.readRecent(null, 1000);
+
+  const res = await request(
+    server,
+    { method: 'POST', path: '/v1/chat/completions', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-internal-key' } },
+    { model: 'claude-haiku-4-5-20251001', messages: [{ role: 'user', content: 'trace_id header test' }] }
+  );
+
+  const traceId = res.headers['x-cachegate-trace-id'];
+  assert.ok(traceId, 'expected an X-Cachegate-Trace-Id response header');
+  assert.match(traceId, /^[0-9a-f]{32}$/, 'expected a 16-byte hex id, matching crypto.randomBytes(16).toString(\'hex\')');
+
+  const after = await metrics.readRecent(null, 1000);
+  const newRows = after.slice(before.length);
+  const row = newRows.find((r) => r.trace_id === traceId);
+  assert.ok(row, 'expected the response\'s own trace_id to appear on a metrics row for this same request');
+});
+
+test('a coalesced joiner records its OWN trace_id plus joined_trace_id pointing at the leader\'s', async (t) => {
+  const server = await listen();
+  t.after(() => server.close());
+
+  const anthropicProvider = require('../providers/anthropic');
+  const originalBuildClient = anthropicProvider.buildClient;
+  const originalChat = anthropicProvider.chat;
+  anthropicProvider.buildClient = () => ({ __fake: true });
+  anthropicProvider.chat = async (client, payload) => {
+    await new Promise((resolve) => setTimeout(resolve, 30)); // hold the leader open long enough for a joiner to arrive
+    return { provider: 'anthropic', model: payload.model, content: 'ok', usage: { input_tokens: 1, output_tokens: 1 }, cost_usd: 0, latency_ms: 1 };
+  };
+  t.after(() => { anthropicProvider.buildClient = originalBuildClient; anthropicProvider.chat = originalChat; });
+
+  const { configure } = require('../server');
+  t.after(() => configure({ resolveProviderKey: (scope, provider) => (provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY) || null }));
+  configure({ resolveProviderKey: async (scope, provider) => (provider === 'anthropic' ? 'fake-key' : null) });
+
+  const metrics = require('../metrics');
+  const before = await metrics.readRecent(null, 1000);
+
+  const opts = { method: 'POST', path: '/v1/chat/completions', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-internal-key' } };
+  const body = { model: 'claude-haiku-4-5-20251001', messages: [{ role: 'user', content: 'coalesced trace_id test' }] };
+  const [first, second] = await Promise.all([request(server, opts, body), request(server, opts, body)]);
+
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+
+  const leaderTraceId = first.headers['x-cachegate-trace-id'];
+  const joinerTraceId = second.headers['x-cachegate-trace-id'];
+  assert.ok(leaderTraceId && joinerTraceId, 'both responses need their own trace id');
+  assert.notEqual(leaderTraceId, joinerTraceId, 'the leader and the joiner are still two distinct requests - they must not share one trace_id');
+
+  const after = await metrics.readRecent(null, 1000);
+  const newRows = after.slice(before.length);
+  const leaderRow = newRows.find((r) => !r.coalesced);
+  const joinerRow = newRows.find((r) => r.coalesced === true);
+  assert.ok(leaderRow, 'expected a leader metrics row');
+  assert.ok(joinerRow, 'expected a joiner metrics row');
+  assert.equal(leaderRow.trace_id, leaderTraceId);
+  assert.equal(leaderRow.joined_trace_id, undefined, 'the leader dispatched itself - it has nothing to point joined_trace_id at');
+  assert.equal(joinerRow.trace_id, joinerTraceId, 'the joiner is still its own request - trace_id must be its own, not the leader\'s');
+  assert.equal(joinerRow.joined_trace_id, leaderTraceId, 'joined_trace_id must point at the dispatch the joiner actually shared');
 });
