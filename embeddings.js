@@ -7,7 +7,7 @@
 //   OPENAI_API_KEY. The pre-existing behavior, unchanged - which means
 //   a deployment that only chats with Anthropic still needs an OpenAI key
 //   for semantic caching, exactly as before.
-// - Local (opt-in): all-MiniLM-L6-v2 via @xenova/transformers, 384-dim,
+// - Local (opt-in): all-MiniLM-L6-v2 via @huggingface/transformers, 384-dim,
 //   pure JS/WASM - no native build, no API key, fully self-hosted. The
 //   model is downloaded and cached by transformers.js on FIRST use, so the
 //   first local embed() is slow; later calls are in-process.
@@ -30,12 +30,15 @@ function getClient() {
   return client;
 }
 
-// The local pipeline is lazy: @xenova/transformers is heavy (WASM + model
-// download on first use), so it must never load unless the flag is on.
+// The local pipeline is lazy: @huggingface/transformers is heavy (WASM +
+// model download on first use), so it must never load unless the flag is
+// on. @huggingface/transformers (v3, same pipeline() API) rather than the
+// frozen @xenova/transformers: the older package pins a vulnerable
+// protobufjs transitively (CVSS 9.8) that ships to every installer.
 let localPipeline;
 async function getLocalPipeline() {
   if (!localPipeline) {
-    const { pipeline } = await import('@xenova/transformers');
+    const { pipeline } = await import('@huggingface/transformers');
     localPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
   }
   return localPipeline;
