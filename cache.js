@@ -53,14 +53,17 @@ function normalizeContent(content) {
 }
 
 // Conservative canonical form of one text block: NFC unicode, structural
-// punctuation folding, whitespace collapse, then literal slotting. The
-// slotting order is most-specific first (URL -> email -> date -> number)
-// so a longer token isn't half-consumed by a shorter pattern. Number
-// slotting is the riskiest of the four - it trades a small false-hit risk
-// for a larger hit-rate gain on templated traffic; a false collision is
-// traceable via CACHE_KEY_DEBUG (below) or by re-running normalizeMessages.
+// punctuation folding, whitespace collapse, then literal slotting. Email
+// and URL slotting are unconditional (an incidental identifier really does
+// want the same answer). Number and date slotting are env-gated, default
+// OFF (CACHE_KEY_SLOT_NUMBERS=true to opt in) - a number or date is very
+// often THE substance of the answer, and on an EXACT cache (no similarity
+// threshold, a guaranteed match) that's a correctness bug, not a tuning
+// knob (Phase 2 step 21, reviewed 2026-09-06). Slotting order is
+// most-specific first (URL -> email -> date -> number) so a longer token
+// isn't half-consumed by a shorter pattern.
 function normalizeText(text) {
-  return String(text)
+  const base = String(text)
     .normalize('NFC')
     .replace(/\u00A0/g, ' ') // non-breaking space
     .replace(/[\u2018\u2019\u201A\u201B]/g, "'") // curly single quotes
@@ -70,10 +73,15 @@ function normalizeText(text) {
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/(?:https?:\/\/|www\.)\S+/gi, '<var>') // URLs
-    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<var>') // emails
-    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, '<var>') // ISO dates
-    .replace(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g, '<var>') // slash dates
-    .replace(/\b\d+(?:\.\d+)?\b/g, '<var>'); // numbers
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<var>'); // emails
+
+  if (process.env.CACHE_KEY_SLOT_NUMBERS === 'true') {
+    return base
+      .replace(/\b\d{4}-\d{2}-\d{2}\b/g, '<var>') // ISO dates
+      .replace(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g, '<var>') // slash dates
+      .replace(/\b\d+(?:\.\d+)?\b/g, '<var>'); // numbers
+  }
+  return base;
 }
 
 function buildCacheKey(scope, payload) {

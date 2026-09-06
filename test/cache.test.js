@@ -89,10 +89,28 @@ test('buildCacheKey slots email literals so templated paraphrases share a key (2
   assert.equal(cache.buildCacheKey(null, a), cache.buildCacheKey(null, b));
 });
 
-test('buildCacheKey slots number and date literals too (21.2)', () => {
+test('buildCacheKey does NOT slot numbers/dates by default (21.2 - gated OFF, Claude review 2026-09-06)', () => {
+  delete process.env.CACHE_KEY_SLOT_NUMBERS;
   const a = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'What happened on 2024-01-15?' }] };
   const b = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'What happened on 2024-03-22?' }] };
-  assert.equal(cache.buildCacheKey(null, a), cache.buildCacheKey(null, b));
+  assert.notEqual(cache.buildCacheKey(null, a), cache.buildCacheKey(null, b));
+  const c = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Give me 5 examples' }] };
+  const d = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Give me 3 examples' }] };
+  assert.notEqual(cache.buildCacheKey(null, c), cache.buildCacheKey(null, d));
+});
+
+test('buildCacheKey slots numbers/dates only when CACHE_KEY_SLOT_NUMBERS=true (21.2)', () => {
+  process.env.CACHE_KEY_SLOT_NUMBERS = 'true';
+  try {
+    const a = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'What happened on 2024-01-15?' }] };
+    const b = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'What happened on 2024-03-22?' }] };
+    assert.equal(cache.buildCacheKey(null, a), cache.buildCacheKey(null, b));
+    const c = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Give me 5 examples' }] };
+    const d = { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'Give me 3 examples' }] };
+    assert.equal(cache.buildCacheKey(null, c), cache.buildCacheKey(null, d));
+  } finally {
+    delete process.env.CACHE_KEY_SLOT_NUMBERS;
+  }
 });
 
 test('buildCacheKey still differs for genuinely different prompts (no over-collapse)', () => {
