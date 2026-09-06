@@ -33,6 +33,16 @@ const streaming = require('./streaming');
 const anthropicProvider = require('./providers/anthropic');
 const openaiProvider = require('./providers/openai');
 const failover = require('./failover');
+const coalescing = require('./coalescing');
+
+// Status-coded error for config/validation failures inside the dispatch
+// (the /v1 catch below reads err.status to pick the HTTP code; provider
+// failures carry no status and default to 502).
+function httpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
 
 const app = express();
 // Any deployment behind a reverse proxy or load balancer (nginx,
@@ -707,68 +717,100 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 
   try {
-    let result;
-    let failedOver = false;
+    // 2.5. Request coalescing (step 24): identical concurrent cache-miss
+    // requests share ONE upstream dispatch (single-flight). Keyed on the
+    // exact cache key, so only byte-identical requests coalesce. The
+    // callback below is the leader's dispatch - provider call, cache
+    // writes, and the leader's cache-miss metric - and a joiner awaits
+    // that same promise instead of dispatching again.
+    const { result: dispatchOutcome, coalesced: wasCoalesced } = await coalescing.joinOrRun(
+      cache.buildCacheKey(scope, payload),
+      async () => {
+        let result;
+        let failedOver = false;
 
-    if (routingDecision) {
-      // Virtual model: try the ranked candidates in order (router.js's
-      // own health/strategy scoring already produced this order),
-      // falling over to the next one when a provider fails in a way
-      // that isn't the REQUEST's own fault - see
-      // failover.isRetryableError for exactly what that means. Every
-      // failed attempt is recorded on the dashboard the same way a
-      // non-failed-over error would be (below), so failover keeps the
-      // request succeeding without hiding the underlying provider
-      // problem from the Provider alerts table.
-      const attempt = await failover.dispatchWithFailover(
-        routingDecision.rankedCandidates,
-        (candidate) => dispatchToProvider(scope, candidate.provider, { ...payload, model: candidate.model }),
-        (candidate, err) => metrics.record(scope, {
-          provider: candidate.provider,
-          model: candidate.model,
+        if (routingDecision) {
+          // Virtual model: try the ranked candidates in order (router.js's
+          // own health/strategy scoring already produced this order),
+          // falling over to the next one when a provider fails in a way
+          // that isn't the REQUEST's own fault - see
+          // failover.isRetryableError for exactly what that means. Every
+          // failed attempt is recorded on the dashboard the same way a
+          // non-failed-over error would be (below), so failover keeps the
+          // request succeeding without hiding the underlying provider
+          // problem from the Provider alerts table.
+          const attempt = await failover.dispatchWithFailover(
+            routingDecision.rankedCandidates,
+            (candidate) => dispatchToProvider(scope, candidate.provider, { ...payload, model: candidate.model }),
+            (candidate, err) => metrics.record(scope, {
+              provider: candidate.provider,
+              model: candidate.model,
+              requested_model: requestedModel,
+              cache_hit: false,
+              error: err.message,
+              error_type: metrics.classifyErrorType(err.message)
+            })
+          );
+          result = attempt.result;
+          failedOver = attempt.attempts > 1;
+          payload.model = result.model; // the candidate that actually served it, if failover moved past the first choice
+          if (failedOver) {
+            console.warn(`⚠️ Model router failover: ${routingDecision.provider}/${routingDecision.model} unavailable, served by ${attempt.candidate.provider}/${attempt.candidate.model} instead (attempt ${attempt.attempts}/${routingDecision.rankedCandidates.length})`);
+          }
+        } else if (isModelAnthropic(payload.model)) {
+          if (!(await seams.resolveProviderKey(scope, 'anthropic'))) {
+            throw httpError(500, 'ANTHROPIC_API_KEY not configured');
+          }
+          result = await anthropicProvider.chat(await getAnthropicClient(scope), payload);
+        } else if (isModelOpenAi(payload.model)) {
+          if (!(await seams.resolveProviderKey(scope, 'openai'))) {
+            throw httpError(500, 'OPENAI_API_KEY not configured');
+          }
+          result = await openaiProvider.chat(await getOpenAiClient(scope), payload);
+        } else {
+          throw httpError(400, `Unsupported model: ${payload.model}`);
+        }
+
+        // Store in both caches - exact-match for identical future
+        // requests, semantic for near-duplicate ones. Both no-op quietly if
+        // their prerequisites (Redis / OPENAI_API_KEY) aren't configured.
+        await cache.set(scope, payload, result);
+        await semanticCache.store(scope, payload, result);
+
+        metrics.record(scope, {
+          provider: result.provider,
+          model: result.model,
           requested_model: requestedModel,
           cache_hit: false,
-          error: err.message,
-          error_type: metrics.classifyErrorType(err.message)
-        })
-      );
-      result = attempt.result;
-      failedOver = attempt.attempts > 1;
-      payload.model = result.model; // the candidate that actually served it, if failover moved past the first choice
-      if (failedOver) {
-        console.warn(`⚠️ Model router failover: ${routingDecision.provider}/${routingDecision.model} unavailable, served by ${attempt.candidate.provider}/${attempt.candidate.model} instead (attempt ${attempt.attempts}/${routingDecision.rankedCandidates.length})`);
+          latency_ms: result.latency_ms,
+          cost_usd: result.cost_usd
+        });
+
+        return { result, failedOver };
       }
-    } else if (isModelAnthropic(payload.model)) {
-      if (!(await seams.resolveProviderKey(scope, 'anthropic'))) {
-        return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
-      }
-      result = await anthropicProvider.chat(await getAnthropicClient(scope), payload);
-    } else if (isModelOpenAi(payload.model)) {
-      if (!(await seams.resolveProviderKey(scope, 'openai'))) {
-        return res.status(500).json({ error: 'OPENAI_API_KEY not configured' });
-      }
-      result = await openaiProvider.chat(await getOpenAiClient(scope), payload);
-    } else {
-      return res.status(400).json({ error: `Unsupported model: ${payload.model}` });
+    );
+
+    const { result, failedOver } = dispatchOutcome;
+
+    if (wasCoalesced) {
+      // Joiner: shared the leader's upstream call - record it distinctly
+      // (coalesced: true, zero NEW cost) so coalescing is measurable, not
+      // just asserted. The leader's record above is the single source of
+      // cost for the one upstream call that actually happened.
+      metrics.record(scope, {
+        provider: result.provider,
+        model: result.model,
+        requested_model: requestedModel,
+        cache_hit: false,
+        coalesced: true,
+        latency_ms: result.latency_ms,
+        cost_usd: 0
+      });
     }
-
-    // Store in both caches - exact-match for identical future
-    // requests, semantic for near-duplicate ones. Both no-op quietly if
-    // their prerequisites (Redis / OPENAI_API_KEY) aren't configured.
-    await cache.set(scope, payload, result);
-    await semanticCache.store(scope, payload, result);
-
-    metrics.record(scope, {
-      provider: result.provider,
-      model: result.model,
-      requested_model: requestedModel,
-      cache_hit: false,
-      latency_ms: result.latency_ms,
-      cost_usd: result.cost_usd
-    });
 
     res.json({
       cached: false,
+      coalesced: wasCoalesced ? true : undefined,
       provider: result.provider,
       model: result.model,
       routed_from: routingDecision ? requestedModel : undefined,
@@ -800,7 +842,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         error_type: metrics.classifyErrorType(err.message)
       });
     }
-    res.status(502).json({ error: err.message });
+    res.status(err.status || 502).json({ error: err.message });
   }
 });
 
