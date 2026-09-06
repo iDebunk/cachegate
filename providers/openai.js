@@ -15,7 +15,14 @@ function estimateCost(model, inputTokens, outputTokens) {
   return ((inputTokens * rate.input) + (outputTokens * rate.output)) / 1_000_000;
 }
 
-async function chat(client, payload) {
+// `options.requestLogprobs` (cascade routing, step 34): ask the API for
+// per-token logprobs so cascade.js can estimate confidence from the response.
+// ONLY set by the router for an OpenAI candidate when cascade is active for
+// that dispatch - a normal caller never sees this, and it's near-zero extra
+// cost on the request it's attached to. top_logprobs: 1 keeps the payload
+// small (one alternative per token) while still carrying the emitted token's
+// own logprob, which is all the confidence math needs.
+async function chat(client, payload, options = {}) {
   const request = {
     model: payload.model,
     messages: payload.messages,
@@ -23,7 +30,8 @@ async function chat(client, payload) {
     max_tokens: payload.max_tokens || 1024,
     ...(payload.tools && { tools: payload.tools }),
     ...(payload.tool_choice && { tool_choice: payload.tool_choice }),
-    ...(payload.response_format && { response_format: payload.response_format })
+    ...(payload.response_format && { response_format: payload.response_format }),
+    ...(options.requestLogprobs && { logprobs: true, top_logprobs: 1 })
   };
 
   const start = Date.now();

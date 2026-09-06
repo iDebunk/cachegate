@@ -107,6 +107,7 @@ async function ensureSchema() {
       ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS scope TEXT;
       ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS coalesced BOOLEAN;
       ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS quality_score REAL;
+      ALTER TABLE router_metrics ADD COLUMN IF NOT EXISTS cascaded BOOLEAN;
       CREATE INDEX IF NOT EXISTS router_metrics_ts_idx ON router_metrics (ts DESC);
       CREATE INDEX IF NOT EXISTS router_metrics_provider_ts_idx ON router_metrics (provider, ts DESC);
       CREATE INDEX IF NOT EXISTS router_metrics_scope_ts_idx ON router_metrics (scope, ts DESC);
@@ -130,6 +131,7 @@ function rowFromPg(dbRow) {
     requested_model: dbRow.requested_model || undefined,
     cache_hit: dbRow.cache_hit === null ? undefined : dbRow.cache_hit,
     coalesced: dbRow.coalesced === null ? undefined : dbRow.coalesced,
+    cascaded: dbRow.cascaded === null ? undefined : dbRow.cascaded,
     quality_score: dbRow.quality_score === null ? undefined : dbRow.quality_score,
     cache_type: dbRow.cache_type || undefined,
     latency_ms: dbRow.latency_ms === null ? undefined : dbRow.latency_ms,
@@ -144,8 +146,8 @@ async function recordToPostgres(scope, entry) {
     await ensureSchema();
     await getPool().query(
       `INSERT INTO router_metrics
-         (scope, provider, model, requested_model, cache_hit, coalesced, quality_score, cache_type, latency_ms, cost_usd, error, error_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+         (scope, provider, model, requested_model, cache_hit, coalesced, cascaded, quality_score, cache_type, latency_ms, cost_usd, error, error_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
         scope != null ? String(scope) : null,
         entry.provider ?? null,
@@ -153,6 +155,7 @@ async function recordToPostgres(scope, entry) {
         entry.requested_model ?? null,
         entry.cache_hit ?? null,
         entry.coalesced ?? null,
+        entry.cascaded ?? null,
         entry.quality_score ?? null,
         entry.cache_type ?? null,
         entry.latency_ms ?? null,

@@ -10,6 +10,7 @@
   "files": [
     "server.js",
     "cache.js",
+    "cascade.js",
     "embeddings.js",
     "failover.js",
     "metrics.js",
