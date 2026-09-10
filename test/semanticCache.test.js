@@ -183,3 +183,90 @@ test('cosineSimilarity() is 1 for identical vectors and 0 for orthogonal ones', 
   assert.equal(semanticCache.cosineSimilarity([1, 0], [0, 1]), 0);
   assert.equal(semanticCache.cosineSimilarity([1, 0], [0, 0]), 0); // zero vector is defined as no similarity, not NaN
 });
+
+// ── storage format (2026-09-10) ────────────────────────────────────────────────
+// The vector moved from JSON numbers to base64 Float32, and the norm is stored with it. Both formats must
+// keep matching from the same list, because every cache in the wild still holds the old one - these tests
+// exist so a future change to the encoding cannot silently stop reading what is already stored.
+test('encodeEmbedding()/decodeEmbedding() round-trip within Float32 precision', () => {
+  const original = Array.from({ length: 1536 }, (_, i) => Math.sin(i) * 0.5 + 0.25);
+  const decoded = semanticCache.decodeEmbedding({ embedding: semanticCache.encodeEmbedding(original) });
+
+  assert.ok(decoded instanceof Float32Array, 'decode returns a typed array, not a plain array');
+  assert.equal(decoded.length, original.length);
+  for (let i = 0; i < original.length; i++) {
+    // Float32 keeps ~7 significant digits; anything looser would hide a real encoding bug.
+    assert.ok(Math.abs(decoded[i] - original[i]) < 1e-6, `element ${i} drifted: ${decoded[i]} vs ${original[i]}`);
+  }
+});
+
+test('decodeEmbedding() still reads the legacy JSON-array format', () => {
+  const legacy = [0.5, -0.25, 1];
+  assert.deepEqual(semanticCache.decodeEmbedding({ embedding: legacy }), legacy);
+});
+
+test('decodeEmbedding() returns null for anything that is not a vector', () => {
+  assert.equal(semanticCache.decodeEmbedding({}), null);
+  assert.equal(semanticCache.decodeEmbedding({ embedding: null }), null);
+  assert.equal(semanticCache.decodeEmbedding({ embedding: 42 }), null);
+  // A base64 string that is not a whole number of 4-byte floats must be rejected, not read as a short
+  // vector - a wrong-length vector would score 0 against everything and look like a miss.
+  const threeBytes = Buffer.from([1, 2, 3]).toString('base64');
+  assert.equal(semanticCache.decodeEmbedding({ embedding: threeBytes }), null);
+});
+
+test('similarityWithNorms() agrees with cosineSimilarity() on the same vectors', () => {
+  const a = [0.3, -0.7, 0.2, 0.9, -0.1];
+  const b = [0.6, 0.4, -0.5, 0.2, 0.8];
+  const viaNorms = semanticCache.similarityWithNorms(a, semanticCache.normOf(a), b, semanticCache.normOf(b));
+  assert.ok(Math.abs(viaNorms - semanticCache.cosineSimilarity(a, b)) < 1e-12, `${viaNorms} vs ${semanticCache.cosineSimilarity(a, b)}`);
+});
+
+test('store() writes the new format, and a lookup still matches it', async () => {
+  const model = 'router-test-model-newformat';
+  const payload = { model, messages: [{ role: 'user', content: 'how do I reset my password' }] };
+  const entry = { provider: 'openai', model, content: 'new format answer' };
+
+  await semanticCache.store(null, payload, entry, { embeddings: fakeEmbeddings });
+
+  const stored = await redisClient.client.lRange(`SEMANTIC_LIST:${model}`, 0, 0);
+  assert.equal(stored.length, 1);
+  const record = JSON.parse(stored[0]);
+  assert.equal(typeof record.embedding, 'string', 'the vector is stored as an encoded string');
+  assert.equal(typeof record.norm, 'number', 'and its norm is stored beside it');
+
+  const match = await semanticCache.findMatch(null, payload, { embeddings: fakeEmbeddings });
+  assert.ok(match, 'a match must still be found for an entry in the new format');
+  assert.equal(match.entry.content, entry.content);
+});
+
+test('a LEGACY entry already in the list still matches (the upgrade is not a cache flush)', async () => {
+  const model = 'router-test-model-legacyentry';
+  const payload = { model, messages: [{ role: 'user', content: 'how do I reset my password' }] };
+
+  // Write the OLD shape by hand: a plain JSON number array, no stored norm - exactly what is sitting in
+  // every cache that existed before this change.
+  const vector = await fakeEmbed(semanticCache.extractPromptText(payload));
+  await redisClient.client.lPush(
+    `SEMANTIC_LIST:${model}`,
+    JSON.stringify({ embedding: vector, entry: { provider: 'openai', model, content: 'legacy answer' }, storedAt: Date.now() })
+  );
+
+  const match = await semanticCache.findMatch(null, payload, { embeddings: fakeEmbeddings });
+  assert.ok(match, 'the legacy entry must still be found');
+  assert.equal(match.entry.content, 'legacy answer');
+  assert.ok(match.similarity > 0.99, `expected near-1 similarity against the legacy vector, got ${match.similarity}`);
+});
+
+test('a malformed vector is skipped, and the good entry beside it still wins', async () => {
+  const model = 'router-test-model-mixed';
+  const payload = { model, messages: [{ role: 'user', content: 'how do I reset my password' }] };
+
+  await redisClient.client.lPush(`SEMANTIC_LIST:${model}`, '{"embedding":"not-a-vector","entry":{"content":"corrupt"}}');
+  await redisClient.client.lPush(`SEMANTIC_LIST:${model}`, 'this is not json at all');
+  await semanticCache.store(null, payload, { provider: 'openai', model, content: 'good answer' }, { embeddings: fakeEmbeddings });
+
+  const match = await semanticCache.findMatch(null, payload, { embeddings: fakeEmbeddings });
+  assert.ok(match, 'the valid entry must still match despite its neighbours');
+  assert.equal(match.entry.content, 'good answer');
+});
