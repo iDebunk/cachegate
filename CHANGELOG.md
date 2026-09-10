@@ -12,6 +12,29 @@ behavior), so an existing deployment that changes nothing is
 byte-identical in observable behavior to 1.3.1.
 
 ### Added
+- **Two more providers — DeepSeek and OpenRouter** — and a provider registry
+  (`providers/index.js`) underneath them. Requests are still routed purely by
+  the model name: `deepseek-*` (e.g. `deepseek-flash`, `deepseek-v4-pro`) goes
+  to DeepSeek, and any `vendor/model` id (e.g. `meta/llama-3-70b`,
+  `deepseek/deepseek-chat`) goes to OpenRouter. Adding a provider is now one
+  module plus one line in the registry: model detection, client construction,
+  the "which key is missing" error and both dispatch paths (direct and
+  `router:` tier) all read from it instead of hardcoding a pair.
+  - **DeepSeek cost tracking is timer- and cache-aware.** DeepSeek bills input
+    in two tiers (cache hit vs miss) and every rate has a peak and an off-peak
+    value (off-peak is exactly half), so `cost_usd` — and therefore cost-based
+    routing — follows the current billing window instead of one flat rate.
+    Its `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens` usage fields are
+    mapped through, so a cached request shows its real (much lower) cost rather
+    than being priced as if nothing was cached.
+  - **OpenRouter pricing is fetched, not hardcoded.** Its catalog spans many
+    vendors and changes without a release of this project, so prices come from
+    OpenRouter's own `/models` endpoint and are cached in-process. When a
+    model's price is unknown, `cost_usd` is `null` — deliberately **not** `0`,
+    which cost-based routing would read as "free" and would win every
+    comparison. Optional `HTTP-Referer`/`X-Title` attribution headers are sent
+    only when `OPENROUTER_SITE_URL`/`OPENROUTER_SITE_NAME` are configured, and
+    the upstream provider OpenRouter actually used is surfaced per response.
 - **`saved_usd` ($ saved)**: `rangeSummary()`, `GET /stats`, and the
   dashboard now report estimated dollars saved by cache hits (average
   cost of a same-model miss × that model's hit count), alongside the
