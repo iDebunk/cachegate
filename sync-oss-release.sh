@@ -58,12 +58,17 @@ cd "$SCRIPT_DIR"
 
 TARGET=""
 NEW_VERSION=""
+ALLOW_DELETIONS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)
       NEW_VERSION="$2"
       shift 2
+      ;;
+    --allow-deletions)
+      ALLOW_DELETIONS="1"
+      shift
       ;;
     *)
       if [[ -z "$TARGET" ]]; then
@@ -78,7 +83,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TARGET" ]]; then
-  echo "Usage: $0 <path-to-public-repo-checkout> [--version X.Y.Z]" >&2
+  echo "Usage: $0 <path-to-public-repo-checkout> [--version X.Y.Z] [--allow-deletions]" >&2
   exit 1
 fi
 
@@ -132,11 +137,6 @@ else
 fi
 
 echo "📦 Step 3/4: mirroring tracked files into $TARGET..."
-# Wipe the target's working tree except .git/, then copy this
-# directory's tracked files in - guarantees the target ends up an
-# EXACT mirror, not an accumulation of whatever used to be there.
-find "$TARGET" -mindepth 1 -maxdepth 1 -not -name ".git" -exec rm -rf {} +
-
 # Never mirrored, even though both are git-tracked right here: internal-
 # only planning docs that chronicle THIS team's own decision-making (this
 # private monorepo's own name, account/strategy discussion) - never meant
@@ -155,6 +155,43 @@ is_never_mirrored() {
   done
   return 1
 }
+
+
+# ── Pre-flight: refuse to delete work that exists ONLY in the target ────────
+# Everything below this point is a MIRROR, not a merge: the wipe deletes every
+# target file this directory does not have. That is correct when this directory
+# is genuinely ahead, and destructive when it is not - and "not" is invisible
+# from the diff, because the missing files are missing on THIS side.
+#
+# Measured on 2026-09-10: the public repo held 17 tracked files this directory
+# lacked (cascade.js, coalescing.js, guardrails.js, pii.js, tracing.js, the
+# eval/ harness, seven test files, the release workflow) plus newer versions of
+# cache.js, providers/openai.js and metrics.js. An unguarded run would have
+# deleted all of it in one commit, silently, in the name of "publishing the OSS
+# release" - and the work existed nowhere else.
+#
+# So list what only the target has and refuse, unless the operator says the
+# deletion is intended (--allow-deletions). Same spirit as the .git check above.
+TARGET_ONLY=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  is_never_mirrored "$f" && continue
+  [[ -e "$f" ]] || TARGET_ONLY+=("$f")
+done < <(git -C "$TARGET" ls-files)
+
+if [[ "${#TARGET_ONLY[@]}" -gt 0 && "$ALLOW_DELETIONS" != "1" ]]; then
+  echo "❌ Refusing to sync: ${#TARGET_ONLY[@]} tracked file(s) exist in the target and not here." >&2
+  printf '   %s\n' "${TARGET_ONLY[@]}" >&2
+  echo "   Syncing would DELETE them, because this script mirrors rather than merges." >&2
+  echo "   Bring them into this directory first (that is the documented direction), or re-run" >&2
+  echo "   with --allow-deletions if removing them from the public repo is really intended." >&2
+  exit 1
+fi
+
+# Wipe the target's working tree except .git/, then copy this
+# directory's tracked files in - guarantees the target ends up an
+# EXACT mirror, not an accumulation of whatever used to be there.
+find "$TARGET" -mindepth 1 -maxdepth 1 -not -name ".git" -exec rm -rf {} +
 
 copied=0
 while IFS= read -r -d '' file; do

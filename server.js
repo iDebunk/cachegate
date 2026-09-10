@@ -30,8 +30,13 @@ const semanticCache = require('./semanticCache');
 const metrics = require('./metrics');
 const router = require('./router');
 const streaming = require('./streaming');
-const anthropicProvider = require('./providers/anthropic');
-const openaiProvider = require('./providers/openai');
+const providers = require('./providers');
+// Kept as aliases: the cascade/grader paths below name these two explicitly
+// (OpenAI's logprobs are the only native confidence signal; Anthropic falls
+// back to a grader model). Everything that generalizes goes through
+// `providers` - see providers/index.js for why.
+const anthropicProvider = providers.get('anthropic');
+const openaiProvider = providers.get('openai');
 const failover = require('./failover');
 const coalescing = require('./coalescing');
 const cascade = require('./cascade');
@@ -205,8 +210,10 @@ const seams = {
   // (See the callers below: they never cache a client built from a
   // non-default resolver's key, so a decrypted per-tenant secret never
   // outlives the one request it was resolved for.)
-  resolveProviderKey: (scope, provider) =>
-    (provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY) || null,
+  resolveProviderKey: (scope, provider) => {
+    const key = providers.envKey(provider);
+    return (key ? process.env[key] : null) || null;
+  },
 
   // Passed straight through as express-rate-limit's own `keyGenerator`.
   // Default: undefined, so express-rate-limit's own per-IP default
@@ -334,25 +341,31 @@ app.use('/v1', rateLimiter, requireInternalKey, express.json({ limit: process.en
 // tenant), every call below builds a fresh client instead of caching
 // one - a decrypted secret must never outlive the one request it was
 // resolved for.
-let anthropicClient;
-let openaiClient;
+// One cached client per provider for the default (unscoped) resolver. A
+// scoped resolver may return a per-tenant decrypted secret, so those clients
+// are deliberately NOT cached - a decrypted key must never outlive the request
+// it was resolved for.
+const defaultClients = new Map();
 
-async function getAnthropicClient(scope) {
-  const key = await seams.resolveProviderKey(scope, 'anthropic');
+async function getProviderClient(scope, provider) {
+  const mod = providers.get(provider);
+  if (!mod) throw Object.assign(new Error(`unknown provider: ${provider}`), { status: 500 });
+  const key = await seams.resolveProviderKey(scope, provider);
   if (scope == null) {
-    if (!anthropicClient) anthropicClient = anthropicProvider.buildClient(key);
-    return anthropicClient;
+    if (!defaultClients.has(provider)) defaultClients.set(provider, mod.buildClient(key));
+    return defaultClients.get(provider);
   }
-  return anthropicProvider.buildClient(key);
+  return mod.buildClient(key);
 }
 
-async function getOpenAiClient(scope) {
-  const key = await seams.resolveProviderKey(scope, 'openai');
-  if (scope == null) {
-    if (!openaiClient) openaiClient = openaiProvider.buildClient(key);
-    return openaiClient;
-  }
-  return openaiProvider.buildClient(key);
+const getAnthropicClient = (scope) => getProviderClient(scope, 'anthropic');
+const getOpenAiClient = (scope) => getProviderClient(scope, 'openai');
+
+// Thin wrappers kept for the call sites that genuinely mean "this one
+// provider" (cascade confidence, the grader). Everything else asks the
+// registry: providerForModel() is the single answer to "who serves this?".
+function providerForModel(model) {
+  return providers.detectProvider(model);
 }
 
 function isModelAnthropic(model) {
@@ -536,16 +549,14 @@ function streamCachedReplay(res, entry, cacheType) {
 // It reaches only providers/openai.js today (requestLogprobs); Anthropic
 // ignores it. Kept backward-compatible - existing callers pass no options.
 async function dispatchToProvider(scope, provider, payload, options = {}) {
-  if (provider === 'anthropic') {
-    if (!(await seams.resolveProviderKey(scope, 'anthropic'))) {
-      throw Object.assign(new Error('ANTHROPIC_API_KEY not configured'), { status: 500 });
-    }
-    return anthropicProvider.chat(await getAnthropicClient(scope), payload);
+  const mod = providers.get(provider);
+  if (!mod) throw Object.assign(new Error(`unknown provider: ${provider}`), { status: 500 });
+  if (!(await seams.resolveProviderKey(scope, provider))) {
+    // Names the variable the provider actually needs - the message is built
+    // from the registry, so it cannot drift from resolveProviderKey above.
+    throw Object.assign(new Error(`${providers.envKey(provider)} not configured`), { status: 500 });
   }
-  if (!(await seams.resolveProviderKey(scope, 'openai'))) {
-    throw Object.assign(new Error('OPENAI_API_KEY not configured'), { status: 500 });
-  }
-  return openaiProvider.chat(await getOpenAiClient(scope), payload, options);
+  return mod.chat(await getProviderClient(scope, provider), payload, options);
 }
 
 // Step 34 (cascade routing): per-provider confidence estimation. OpenAI's
@@ -574,7 +585,9 @@ function buildConfidenceEstimator(scope, payload, requestedModel, traceId) {
 async function graderConfidence(scope, payload, requestedModel, result, traceId) {
   const graderModel = process.env.CASCADE_GRADER_MODEL;
   if (!graderModel) return null; // no grader configured -> no signal -> fail open
-  const graderProvider = isModelAnthropic(graderModel) ? 'anthropic' : (isModelOpenAi(graderModel) ? 'openai' : null);
+  // Any chat-capable provider can grade (it is asked to reply with a number),
+  // so this asks the registry rather than hardcoding two names.
+  const graderProvider = providerForModel(graderModel);
   if (!graderProvider) return null;
   try {
     const grade = await dispatchToProvider(scope, graderProvider, {
@@ -615,15 +628,12 @@ async function graderConfidence(scope, payload, requestedModel, result, traceId)
 // half-working (see ROADMAP.md).
 async function handleStreamingDispatch(req, res, payload, requestedModel, routingDecision, traceId) {
   const scope = req.scope;
-  let providerName;
-  if (isModelAnthropic(payload.model)) {
-    providerName = 'anthropic';
-    if (!(await seams.resolveProviderKey(scope, 'anthropic'))) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
-  } else if (isModelOpenAi(payload.model)) {
-    providerName = 'openai';
-    if (!(await seams.resolveProviderKey(scope, 'openai'))) return res.status(500).json({ error: 'OPENAI_API_KEY not configured' });
-  } else {
+  const providerName = providerForModel(payload.model);
+  if (!providerName) {
     return res.status(400).json({ error: `Unsupported model: ${payload.model}` });
+  }
+  if (!(await seams.resolveProviderKey(scope, providerName))) {
+    return res.status(500).json({ error: `${providers.envKey(providerName)} not configured` });
   }
 
   streaming.startSse(res);
@@ -637,8 +647,8 @@ async function handleStreamingDispatch(req, res, payload, requestedModel, routin
 
   let result;
   try {
-    const client = providerName === 'anthropic' ? await getAnthropicClient(scope) : await getOpenAiClient(scope);
-    const chatStreamFn = providerName === 'anthropic' ? anthropicProvider.chatStream : openaiProvider.chatStream;
+    const client = await getProviderClient(scope, providerName);
+    const chatStreamFn = providers.get(providerName).chatStream;
     result = await chatStreamFn(client, payload, {
       signal: controller.signal,
       onDelta: (text) => res.write(streaming.deltaChunk({ id, model: payload.model, content: text }))
@@ -978,16 +988,15 @@ async function handleCompletion(req, res, traceId) {
           if (failedOver) {
             console.warn(`⚠️ Model router failover: ${routingDecision.provider}/${routingDecision.model} unavailable, served by ${attempt.candidate.provider}/${attempt.candidate.model} instead (attempt ${attempt.attempts}/${routingDecision.rankedCandidates.length})`);
           }
-        } else if (isModelAnthropic(payload.model)) {
-          if (!(await seams.resolveProviderKey(scope, 'anthropic'))) {
-            throw httpError(500, 'ANTHROPIC_API_KEY not configured', { skipMetric: true });
+        } else if (providerForModel(payload.model)) {
+          const directProvider = providerForModel(payload.model);
+          if (!(await seams.resolveProviderKey(scope, directProvider))) {
+            throw httpError(500, `${providers.envKey(directProvider)} not configured`, { skipMetric: true });
           }
-          result = await anthropicProvider.chat(await getAnthropicClient(scope), payload);
-        } else if (isModelOpenAi(payload.model)) {
-          if (!(await seams.resolveProviderKey(scope, 'openai'))) {
-            throw httpError(500, 'OPENAI_API_KEY not configured', { skipMetric: true });
-          }
-          result = await openaiProvider.chat(await getOpenAiClient(scope), payload);
+          result = await providers.get(directProvider)
+            .chat(await getProviderClient(scope, directProvider), payload, {
+              requestLogprobs: cascade.isEnabled() && directProvider === 'openai'
+            });
         } else {
           throw httpError(400, `Unsupported model: ${payload.model}`, { skipMetric: true });
         }
@@ -1095,7 +1104,9 @@ async function handleCompletion(req, res, traceId) {
       // not a restoration - the original inline `return res.status(...)`
       // code never touched metrics for these either.
       metrics.record(scope, {
-        provider: isModelAnthropic(payload.model) ? 'anthropic' : 'openai',
+        // `|| 'openai'` keeps the pre-registry fallback for a model nothing
+        // claims, so this metric row is not a behavior change.
+        provider: providerForModel(payload.model) || 'openai',
         model: payload.model,
         requested_model: requestedModel,
         cache_hit: false,

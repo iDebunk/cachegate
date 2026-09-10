@@ -50,8 +50,10 @@ fills instead:
   `CONTRIBUTING.md`'s scope note) — not because the license forbids it
   (MIT permits exactly that — see `LICENSE`), but because it's not what
   this project is for.
-- **Not a 140-provider gateway.** Anthropic and OpenAI today (see
-  "Features" below for the honest current gap against a wider pitch).
+- **Not a 140-provider gateway.** Four providers today — Anthropic, OpenAI,
+  DeepSeek and OpenRouter (the last one fronting many vendors behind a single
+  key). No Gemini, no Groq, no local models yet; see "Features" below for the
+  honest current gap against a wider pitch.
 - **Not a vector-indexed semantic cache** (yet) — see "Two kinds of
   cache hit" for the real, disclosed scale limit.
 
@@ -111,8 +113,10 @@ Create or edit your local `.env` file (do **not** overwrite an existing one):
 PORT=4000
 MODEL_ROUTER_INTERNAL_KEY=your-random-internal-key
 ANTHROPIC_API_KEY=your-real-key-here
-# Optional:
+# Optional - any one of these unlocks that provider's models:
 # OPENAI_API_KEY=your-openai-key-here
+# DEEPSEEK_API_KEY=your-deepseek-key-here       # models: deepseek-flash, deepseek-v4-pro
+# OPENROUTER_API_KEY=your-openrouter-key-here   # models: any vendor/model id, e.g. meta/llama-3-70b
 # REDIS_URL=redis://localhost:6379
 ```
 
@@ -204,7 +208,9 @@ monorepo today).
 ## Usage
 
 Direct dispatch - name a specific provider's model, same as calling that
-provider yourself:
+provider yourself. The provider is chosen from the model name: `claude-*` ->
+Anthropic, `gpt-*`/`o1*`/`o3*` -> OpenAI, `deepseek-*` -> DeepSeek, and
+`vendor/model` -> OpenRouter.
 
 ```bash
 curl http://localhost:4000/v1/chat/completions \
@@ -215,6 +221,13 @@ curl http://localhost:4000/v1/chat/completions \
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Say hello"}]
   }'
+```
+
+Same call against DeepSeek or OpenRouter - only the `model` changes:
+
+```bash
+  -d '{"model": "deepseek-flash", "messages": [{"role": "user", "content": "Say hello"}]}'
+  -d '{"model": "meta/llama-3-70b", "messages": [{"role": "user", "content": "Say hello"}]}'
 ```
 
 Routed dispatch - name a capability tier instead, and the router picks
@@ -284,8 +297,18 @@ auth, for local development only.
   streaming caller still gets the caching benefit. See "Streaming"
   below for the real scope boundary (tool-call streaming isn't
   included) and the cost-tracking detail it depends on.
-- Anthropic and OpenAI providers. (Not yet: Gemini, Groq, local models -
-  a real gap against the two-provider skeleton's original pitch.)
+- Four providers: Anthropic, OpenAI, DeepSeek and OpenRouter. (Not yet:
+  Gemini, Groq, local models - still a real gap against a wide-gateway pitch,
+  just a smaller one.) Adding another is deliberately cheap now: one module
+  under `providers/` plus a line in `providers/index.js` - every dispatch
+  path, the model-name detection and the "which key is missing" error all read
+  from that registry rather than hardcoding a pair.
+- **DeepSeek pricing is time-aware.** DeepSeek bills input in two tiers (cache
+  hit vs miss) and every rate has a peak and an off-peak value, so its cost
+  estimates - and therefore cost-based routing - reflect the current billing
+  window instead of a single flat rate. Opting into DeepSeek is also the one
+  place where prompt caching is billed this aggressively, so `cost_usd` on
+  those requests can be dramatically lower than the token count suggests.
 - Redis-backed exact-match response cache by content hash - the first,
   free, zero-risk check on every request.
 - A semantic cache on top of it, for near-duplicate prompts the exact
