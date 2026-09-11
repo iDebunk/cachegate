@@ -61,3 +61,68 @@ jobs:
 
       - run: npm ci
       - run: npm test
+
+  # Guards package.json's `files` allowlist.
+  #
+  # Note what this is and is not. npm ALREADY refuses to pack anything
+  # outside `files`, so this is not a stray-file detector - a file that
+  # isn't in the allowlist simply never reaches the tarball. What it
+  # catches is the allowlist itself being removed, emptied, or widened,
+  # which is the shape the 1.0.0/1.1.0 leak took: those tarballs shipped
+  # OPEN_SOURCE_ROADMAP.md and ROADMAP.md because no `files` field existed
+  # yet. So it is an integrity check on the guard, not a tripwire on the
+  # thing the guard already catches.
+  #
+  # Single Node version, not the matrix above - the answer cannot differ
+  # by runtime, and every job here is billed.
+  pack-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      # No `npm ci`: `npm pack --dry-run` only enumerates files, and this
+      # package has no prepare/prepack script that would need deps.
+      - name: Check the packed tarball against package.json `files`
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+          const fs = require("fs"), path = require("path");
+          const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"));
+          const raw = pkg.files;
+          const norm = f => String(f).replace(/^\.\//, "").replace(/\/+$/, "");
+          const allow = Array.isArray(raw) ? raw.map(norm) : [];
+          const ALWAYS = /^(package\.json|readme(\..+)?|licen[cs]e(\..+)?|changelog(\..+)?|notice(\..+)?)$/i;
+
+          const problems = [];
+          if (!Array.isArray(raw) || raw.length === 0) {
+            problems.push("`files` is missing or empty - npm would pack the whole repo, which is exactly the 1.0.0/1.1.0 leak.");
+          }
+          const broad = allow.filter(a => a === "*" || a === "." || a === "");
+          if (broad.length) {
+            problems.push("`files` contains a ship-everything entry (" + broad.map(a => JSON.stringify(a)).join(", ") + ").");
+          }
+
+          const packed = JSON.parse(fs.readFileSync("/tmp/pack.json", "utf8"))[0].files.map(f => f.path);
+          const covered = p => {
+            const q = norm(p);
+            if (ALWAYS.test(q)) return true;
+            return allow.some(a => q === a || q.startsWith(a + "/"));
+          };
+          const extra = packed.filter(p => !covered(p));
+          if (extra.length) problems.push(extra.length + " path(s) would ship outside `files`:\n  " + extra.join("\n  "));
+
+          // A vacuous pass is worse than no check.
+          const missing = ["package.json", "server.js"].filter(p => !packed.includes(p));
+          if (missing.length) problems.push("these must ship and do not: " + missing.join(", "));
+
+          if (problems.length) {
+            console.error("pack-check FAILED:");
+            problems.forEach(p => console.error("  x " + p));
+            console.error("\nFix the `files` allowlist deliberately - do not just widen it to make this pass.");
+            process.exit(1);
+          }
+          console.log("pack-check OK - " + packed.length + " file(s); `files` present with " + allow.length + " entries.");
+          '
