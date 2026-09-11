@@ -4,6 +4,33 @@ All notable changes to `cachegate` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 uses [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed — UPGRADE NOTE for proxied deployments
+- **`trust proxy` is now configurable, and its default is secure rather than convenient.** It was
+  hardcoded to `1`: correct for a single reverse proxy, wrong for the topology this repo's README
+  documents (`docker run -p 4000:4000`, no proxy). There, `1` tells express to trust
+  `X-Forwarded-For`, which is client-controlled, so a caller can present a fresh IP on every request
+  and the per-IP limiter on the key-holding routes is defeated — fail-**open**, and silent. The
+  default is now `false`, which behind a real proxy fails **closed** and loud: the limiter keys
+  globally until it is set, one env var away from correct.
+  **If you run behind a proxy, set `TRUST_PROXY=1` (single hop) or your real hop count.** An
+  unparseable value now refuses to start rather than silently changing limiter scope, and a Render
+  deployment gets a boot-time warning when it is unset. The Cloud deployment must set it explicitly
+  in its own `render.yaml` / `RENDER-ENV-MAP.md`.
+
+### Fixed
+- **The semantic cache could serve a plain-text answer to a `json_object` caller.** The exact cache
+  keyed `response_format`; the semantic path never did. A caller that asked for JSON could receive
+  cached prose, fail to parse it, and surface the failure as an upstream outage rather than a cache
+  miss. Matching there is by embedding, so the shape cannot live in a key: it is now stored beside
+  each entry and enforced as a hard filter. The allowed direction is asymmetric ON PURPOSE — a
+  request that demands nothing about the answer's shape can still be served an entry that predates
+  the gate (so the upgrade is not a cache flush), while a request that *does* demand a shape may only
+  be served by an entry that proves it matches. The answer-shape fields (`tools`, `tool_choice`,
+  `response_format`, `seed`) are now defined once in `cache.js` and called by both paths, because
+  adding them one at a time is exactly how the two drifted apart.
+
 ## [1.4.0] - 2026-09-06
 
 Everything below is additive and opt-in — every new feature ships

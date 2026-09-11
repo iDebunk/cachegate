@@ -84,6 +84,29 @@ function normalizeText(text) {
   return base;
 }
 
+// The fields that change the SHAPE of an answer rather than its content, defined ONCE because two
+// paths consume them: buildCacheKey folds them into the exact-cache key, and semanticCache.js stores
+// them beside an entry and refuses a hit across a mismatch. Adding them one at a time is precisely how
+// the two paths drifted apart - this key learned about response_format and the semantic path never did
+// - so the list lives in one place and both call it.
+//
+// temperature is deliberately ABSENT: it already participates in the exact key with a real numeric
+// default (`?? 0.0`), and semantic matching is approximate by design, so gating on it there would
+// mostly lower the hit rate for callers who leave it at the default. seed IS here: it is a determinism
+// contract, not a sampling hint.
+//
+// Key ORDER matters - it is part of the serialization the hash is taken over - and it is kept
+// identical to the inline field list this replaced. JSON.stringify drops undefined values, so a payload
+// with no seed produces a byte-identical key and the change does not flush the cache.
+function shapeFields(payload) {
+  return {
+    tools: payload.tools,
+    tool_choice: payload.tool_choice,
+    response_format: payload.response_format,
+    seed: payload.seed
+  };
+}
+
 function buildCacheKey(scope, payload) {
   const canonicalMessages = normalizeMessages(payload.messages);
   if (process.env.CACHE_KEY_DEBUG) {
@@ -98,14 +121,7 @@ function buildCacheKey(scope, payload) {
     messages: canonicalMessages,
     temperature: payload.temperature ?? 0.0,
     max_tokens: payload.max_tokens,
-    tools: payload.tools,
-    tool_choice: payload.tool_choice,
-    // response_format changes the SHAPE of the answer (json_object vs
-    // plain text), so it must participate in the key too - otherwise a
-    // cached plain-text response could be served to a json_object caller
-    // (or vice versa). openai.js forwards it (see its own chat()); this
-    // file used to omit it, making an "exact" hit not always exact.
-    response_format: payload.response_format
+    ...shapeFields(payload)
   });
   const hash = crypto.createHash('sha256').update(normalized).digest('hex');
   const prefix = scope != null ? `ROUTER:${scope}:` : 'ROUTER:';
@@ -114,6 +130,7 @@ function buildCacheKey(scope, payload) {
 
 module.exports = {
   buildCacheKey,
+  shapeFields,
   normalizeMessages,
   normalizeText,
 
