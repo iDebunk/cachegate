@@ -817,6 +817,25 @@ async function handleCompletion(req, res, traceId) {
   // whether or not the caller asked for stream:true - see
   // streamCachedReplay() for the streaming case.
   const cached = await tracing.withSpan('cache.exact', { trace_id: traceId }, () => cache.get(scope, payload));
+
+  // R4 (review 2026-09-10): the measurement that decides whether URL/email literal slotting earns its
+  // keep. One line per request carrying (a) whether the exact cache hit and (b) which slotting rules
+  // fired, so a week of logs splits hit rate by slotting instead of arguing about it. slottingFlags
+  // also reports the GATED rules (date, number), which is what makes the number/date decision priceable
+  // without turning it on - that gate stays off.
+  //
+  // Only this path: slotting lives in the exact-cache key. The semantic path embeds the raw prompt, so
+  // slotting does not touch it and a line there would measure nothing.
+  //
+  // Honest limit, stated here rather than discovered later: this is the hit rate AMONG requests that
+  // slot, not the rate they would have had WITHOUT slotting. The true counterfactual needs a second
+  // lookup per request, which is a behaviour change - and this measurement is not allowed to change the
+  // thing it measures.
+  if (process.env.CACHE_SLOT_STATS !== '0') {
+    const sf = cache.slottingFlags(payload.messages);
+    console.log(`[cacheslot] hit=${cached ? 1 : 0} model=${payload.model} url=${sf.url} email=${sf.email} date=${sf.date} number=${sf.number} numbers_gate=${sf.numbers_gate}`);
+  }
+
   if (cached) {
     metrics.record(scope, {
       provider: cached.provider,

@@ -176,3 +176,60 @@ test('isConnected() tracks isReady, not isOpen - so a reconnecting-after-drop cl
   assert.equal(redisClient.client.isOpen, true); // the exact state that used to read as "connected"
   assert.equal(cache.isConnected(), false); // must fail open instead
 });
+
+// --- R4 (review 2026-09-10): the slotting measurement -------------------------------------------
+// Decides whether URL/email literal slotting earns its keep, and prices the number/date gate without
+// turning it on. The measurement must not change what the key DOES, so this also guards the refactor
+// that made the slotting rules one shared list (the key tests above remain the regression guard for
+// the output; these cover the reporting).
+const cacheMod = require('../cache');
+
+test('slottingFlags() reports the unconditional rules that fire', () => {
+  const f = cacheMod.slottingFlags([
+    { role: 'user', content: 'see https://example.com/a and write to me@example.com' }
+  ]);
+  assert.equal(f.url, 1, 'a URL fires the url rule');
+  assert.equal(f.email, 1, 'an address fires the email rule');
+});
+
+test('slottingFlags() reports GATED rules even while the gate is off', () => {
+  const saved = process.env.CACHE_KEY_SLOT_NUMBERS;
+  delete process.env.CACHE_KEY_SLOT_NUMBERS;
+  try {
+    const f = cacheMod.slottingFlags([{ role: 'user', content: 'on 2026-09-10 there were 42 items' }]);
+    assert.equal(f.date, 1, 'the date rule must be visible, so the decision can be priced without enabling it');
+    assert.equal(f.number, 1, 'same for numbers');
+    assert.equal(f.numbers_gate, 0, 'and the gate state is reported beside it');
+  } finally {
+    if (saved === undefined) delete process.env.CACHE_KEY_SLOT_NUMBERS;
+    else process.env.CACHE_KEY_SLOT_NUMBERS = saved;
+  }
+});
+
+test('slottingFlags() reports the gate ON when it is set, and matches no rule in plain prose', () => {
+  const saved = process.env.CACHE_KEY_SLOT_NUMBERS;
+  process.env.CACHE_KEY_SLOT_NUMBERS = 'true';
+  try {
+    const on = cacheMod.slottingFlags([{ role: 'user', content: 'plain prose, nothing special here' }]);
+    assert.equal(on.numbers_gate, 1);
+    assert.equal(on.url + on.email + on.date + on.number, 0, 'plain prose must fire nothing');
+  } finally {
+    if (saved === undefined) delete process.env.CACHE_KEY_SLOT_NUMBERS;
+    else process.env.CACHE_KEY_SLOT_NUMBERS = saved;
+  }
+});
+
+test('the number/date gate still changes the KEY, and only when enabled', () => {
+  const saved = process.env.CACHE_KEY_SLOT_NUMBERS;
+  const payload = { model: 'gpt-4o', messages: [{ role: 'user', content: 'answer for 2026-09-10' }] };
+  try {
+    delete process.env.CACHE_KEY_SLOT_NUMBERS;
+    const off = cacheMod.buildCacheKey(null, payload);
+    process.env.CACHE_KEY_SLOT_NUMBERS = 'true';
+    const on = cacheMod.buildCacheKey(null, payload);
+    assert.notEqual(off, on, 'enabling the gate must change the key for a dated prompt');
+  } finally {
+    if (saved === undefined) delete process.env.CACHE_KEY_SLOT_NUMBERS;
+    else process.env.CACHE_KEY_SLOT_NUMBERS = saved;
+  }
+});
