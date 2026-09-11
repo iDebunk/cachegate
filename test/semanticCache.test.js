@@ -270,3 +270,76 @@ test('a malformed vector is skipped, and the good entry beside it still wins', a
   assert.ok(match, 'the valid entry must still match despite its neighbours');
   assert.equal(match.entry.content, 'good answer');
 });
+// --- answer-shape gate (review 2026-09-10) ------------------------------------------------------
+// cache.js keyed response_format and this path never did, so a json_object caller could be served a
+// cached PLAIN-TEXT answer - which fails to parse in the caller and surfaces as an upstream outage,
+// worse than a miss. Matching here is by embedding, so the shape cannot go into a key: it is stored
+// beside the entry and enforced as a hard filter. Same reasoning that already excludes tool calls.
+test('a json_object request is not served a cached plain-text answer', async () => {
+  const model = 'router-test-model-shape-1';
+  const base = { model, messages: [{ role: 'user', content: 'what is the capital of France' }] };
+
+  await semanticCache.store(null, base, { provider: 'openai', model, content: 'Paris, in prose.' },
+    { embeddings: fakeEmbeddings });
+
+  const asJson = await semanticCache.findMatch(null,
+    { ...base, response_format: { type: 'json_object' } }, { embeddings: fakeEmbeddings });
+  assert.equal(asJson, null, 'a json_object caller must not be handed the prose entry');
+
+  const asProse = await semanticCache.findMatch(null, base, { embeddings: fakeEmbeddings });
+  assert.ok(asProse, 'the same question with the same shape must still hit');
+  assert.equal(asProse.entry.content, 'Paris, in prose.');
+});
+
+test('the gate is a filter, not a blanket refusal: matching shapes still hit', async () => {
+  const model = 'router-test-model-shape-2';
+  const payload = {
+    model,
+    messages: [{ role: 'user', content: 'list the three primary colours' }],
+    response_format: { type: 'json_object' }
+  };
+  await semanticCache.store(null, payload, { provider: 'openai', model, content: '{"colours":["red"]}' },
+    { embeddings: fakeEmbeddings });
+
+  const hit = await semanticCache.findMatch(null,
+    { ...payload, messages: [{ role: 'user', content: 'list the three primary colours please' }] },
+    { embeddings: fakeEmbeddings });
+  assert.ok(hit, 'a json_object request must still hit a json_object entry');
+});
+
+test('an entry with NO recorded shape is refused to a caller that demands a shape', async () => {
+  const model = 'router-test-model-shape-legacy';
+  const payload = { model, messages: [{ role: 'user', content: 'a question from before the gate' }] };
+
+  // Store normally, then rewrite the record without its `shape` field - byte-for-byte what the old
+  // code wrote. Reusing the stored embedding keeps this a real similarity match, so the ONLY reason
+  // the lookup can miss is the gate itself.
+  await semanticCache.store(null, payload, { provider: 'openai', model, content: 'old answer' },
+    { embeddings: fakeEmbeddings });
+  const [raw] = await redisClient.client.lRange(`SEMANTIC_LIST:${model}`, 0, 0);
+  const record = JSON.parse(raw);
+  assert.ok(record.shape, 'the store must record a shape at all');
+  await redisClient.client.del(`SEMANTIC_LIST:${model}`);
+  await redisClient.client.lPush(`SEMANTIC_LIST:${model}`,
+    JSON.stringify({ embedding: record.embedding, entry: record.entry, storedAt: Date.now() }));
+
+  const log = console.log;
+  console.log = () => {};
+  let asJson, asProse;
+  try {
+    // The dangerous direction, and the reason the gate exists: a json_object caller handed prose fails
+    // to parse it, which reads as an upstream outage rather than a cache miss.
+    asJson = await semanticCache.findMatch(null,
+      { ...payload, response_format: { type: 'json_object' } }, { embeddings: fakeEmbeddings });
+    // The other direction is deliberately allowed, and it is what keeps "an upgrade is not a cache
+    // flush" true: a request that demands nothing about the answer's shape can consume either form, so
+    // an entry predating the gate is still served. Both properties are asserted here because the
+    // asymmetry between them IS the design - see the gate in findMatch.
+    asProse = await semanticCache.findMatch(null, payload, { embeddings: fakeEmbeddings });
+  } finally {
+    console.log = log;
+  }
+  assert.equal(asJson, null, 'an unproven shape must not be served to a caller that demands one');
+  assert.ok(asProse, 'but a shape-neutral caller still gets it, so the gate is not a cache flush');
+  assert.equal(asProse.entry.content, 'old answer');
+});

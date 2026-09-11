@@ -94,25 +94,52 @@ const app = express();
 // tracing.js) - so both the standalone server and a wrapping deployment
 // (cachegate-cloud's cloud-server.js) get tracing without any extra call.
 tracing.initTracing();
-// Any deployment behind a reverse proxy or load balancer (nginx,
-// Traefik, Render, Heroku, ...) forwards the real client IP in
-// X-Forwarded-For rather than as the raw socket address. Express's own
-// default (`trust proxy` unset, i.e. false) makes express-rate-limit
-// refuse that header outright the moment it's present - it throws
-// ERR_ERL_UNEXPECTED_X_FORWARDED_FOR inside its key generator on every
-// request through a rate-limited route, rather than risk keying
-// per-caller limits off a spoofable header it hasn't been told to
-// trust. Found running this behind a single-hop proxy in production
-// (Cachegate Cloud, 2026-09-04) - not fatal to the request itself, but
-// it means the per-IP rate limiter was keying off the proxy's own IP
-// for every caller instead of each real client, so brute-force/abuse
-// limiting on auth-style routes was effectively shared across ALL
-// users rather than per-user. `1` (trust exactly one hop) is the
-// correct value for a single reverse-proxy topology - the common case
-// this engine actually runs behind. A deployment with more than one
-// proxy hop in front of it should set this to the real hop count
-// instead (see Express's own `trust proxy` docs) rather than assume 1.
-app.set('trust proxy', 1);
+// `trust proxy`, now CONFIGURABLE and secure by default. The previous hardcoded `1` was chosen for
+// Cachegate Cloud's single-hop topology (2026-09-04) and is right THERE, but it is the wrong default
+// for the topology this engine's own README documents (`docker run -p 4000:4000`: no proxy at all).
+// In that topology `1` trusts a client-controlled X-Forwarded-For, so any caller can present a fresh
+// IP on every request and the per-IP limiter on the key-holding routes is defeated - fail-OPEN, and
+// silent. `false` behind a real proxy is fail-CLOSED and loud: the limiter keys globally, one env var
+// away from correct. Every other security decision in this file fails closed (no DATABASE_URL, no
+// API_KEY_ENCRYPTION_SECRET, auth) and this should not be the exception.
+//
+// Deployment note: a proxied deployment MUST now set TRUST_PROXY explicitly - Cachegate Cloud sets
+// TRUST_PROXY=1 in render.yaml and RENDER-ENV-MAP.md. Upgrade impact is a boot-time warning on Render
+// (see below) plus a CHANGELOG entry, not a silent change of limiter scope.
+function resolveTrustProxy(raw) {
+  const value = raw == null ? '' : String(raw).trim();
+  if (value === '') {
+    // Only warn where a proxy demonstrably exists: Render sets RENDER/RENDER_EXTERNAL_URL. Warning on
+    // every unset boot would be noise in the topology where false is the correct answer.
+    if (process.env.RENDER || process.env.RENDER_EXTERNAL_URL) {
+      console.warn(
+        '⚠️  TRUST_PROXY is unset and this looks like a proxied deployment: assuming NO proxy. ' +
+        'Set TRUST_PROXY=1 (single hop) or the real hop count, or per-IP rate limiting will be global.'
+      );
+    }
+    return false;
+  }
+  const lower = value.toLowerCase();
+  if (['false', '0', 'off', 'no'].includes(lower)) return false;
+  if (lower === 'true') return true;
+  if (/^\d+$/.test(value)) return parseInt(value, 10);
+  // Express also accepts a list of addresses/CIDRs plus the keywords loopback/linklocal/uniquelocal -
+  // the form a real multi-hop deployment needs - so that is passed through. A guess here is not
+  // harmless: a typo that express cannot parse would fall back to trusting nothing (or everything),
+  // silently changing limiter scope, which is the class of bug this whole block exists to prevent.
+  const tokens = value.split(',').map((t) => t.trim()).filter(Boolean);
+  const valid = tokens.length > 0 && tokens.every((t) =>
+    ['loopback', 'linklocal', 'uniquelocal'].includes(t.toLowerCase()) ||
+    /^[0-9a-fA-F:.]+(\/\d{1,3})?$/.test(t));
+  if (valid) return tokens;
+  throw new Error(
+    `TRUST_PROXY="${value}" is not a value express can use. Expected false/true, a hop count, or a ` +
+    'comma-separated list of IPs/CIDRs (loopback, linklocal, uniquelocal are also accepted). ' +
+    'Refusing to start rather than silently changing rate-limiter scope.'
+  );
+}
+
+app.set('trust proxy', resolveTrustProxy(process.env.TRUST_PROXY));
 // No X-Powered-By: Express - free, standard hardening (avoids handing a
 // public-facing service's framework fingerprint to every caller for no
 // benefit).
@@ -1203,4 +1230,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, isAuthConfigured, resolveEnvPathFromArgv, configure };
+module.exports = { app, isAuthConfigured, resolveEnvPathFromArgv, resolveTrustProxy, configure };
