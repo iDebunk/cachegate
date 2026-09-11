@@ -19,6 +19,20 @@ uses [semantic versioning](https://semver.org/).
   deployment gets a boot-time warning when it is unset. The Cloud deployment must set it explicitly
   in its own `render.yaml` / `RENDER-ENV-MAP.md`.
 
+### Added
+- **A slotting measurement line, so the URL/email slotting decision can be made on data instead of
+  taste.** Every exact-cache lookup logs one line —
+  `[cacheslot] hit=<0|1> model=<m> url=<0|1> email=<0|1> date=<0|1> number=<0|1> numbers_gate=<0|1>` —
+  which over a week splits hit rate by whether slotting fired. It reports the **gated** rules too
+  (`date`, `number`) while that gate stays off, so enabling it can be priced without enabling it.
+  Disable with `CACHE_SLOT_STATS=0`.
+  - Honest limit: this is the hit rate **among requests that slot**, not the rate they would have had
+    without slotting. The true counterfactual needs a second lookup per request, which would be a
+    behaviour change — and this measurement is not allowed to change the thing it measures.
+  - The slotting rules are now a single shared list (`SLOTTERS` in `cache.js`) that both `normalizeText`
+    and the reporting read, so the measurement cannot drift from the behaviour it measures. The existing
+    key tests are the regression guard: they are unchanged and still pass.
+
 ### Fixed
 - **The semantic cache could serve a plain-text answer to a `json_object` caller.** The exact cache
   keyed `response_format`; the semantic path never did. A caller that asked for JSON could receive

@@ -53,17 +53,31 @@ function normalizeContent(content) {
 }
 
 // Conservative canonical form of one text block: NFC unicode, structural
-// punctuation folding, whitespace collapse, then literal slotting. Email
-// and URL slotting are unconditional (an incidental identifier really does
-// want the same answer). Number and date slotting are env-gated, default
-// OFF (CACHE_KEY_SLOT_NUMBERS=true to opt in) - a number or date is very
-// often THE substance of the answer, and on an EXACT cache (no similarity
-// threshold, a guaranteed match) that's a correctness bug, not a tuning
-// knob (Phase 2 step 21, reviewed 2026-09-06). Slotting order is
-// most-specific first (URL -> email -> date -> number) so a longer token
-// isn't half-consumed by a shorter pattern.
-function normalizeText(text) {
-  const base = String(text)
+// The literal-slotting steps, defined ONCE: normalizeText applies them, and slottingFlags() reports
+// which ones actually fire. Two definitions would be the same mistake R2 fixed one file over - a rule
+// enforced on one path and quietly stale on the other - and here it would be worse, because the
+// measurement would drift away from the behaviour it is supposed to be measuring.
+//
+// Order is most-specific-first (URL -> email -> date -> number) so a longer token is not half-consumed
+// by a shorter pattern. URLs and emails are unconditional: an incidental identifier really does want
+// the same answer. Numbers and dates are GATED, default OFF (CACHE_KEY_SLOT_NUMBERS) - a number or a
+// date is very often THE substance of the answer, and on an EXACT cache (no similarity threshold, a
+// guaranteed match) that is a correctness bug rather than a tuning knob.
+const SLOTTERS = [
+  { name: 'url', re: /(?:https?:\/\/|www\.)\S+/gi, gated: false },
+  { name: 'email', re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, gated: false },
+  { name: 'date', re: /\b\d{4}-\d{2}-\d{2}\b/g, gated: true },
+  { name: 'date', re: /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g, gated: true },
+  { name: 'number', re: /\b\d+(?:\.\d+)?\b/g, gated: true }
+];
+
+function numbersSlottingEnabled() {
+  return process.env.CACHE_KEY_SLOT_NUMBERS === 'true';
+}
+
+// punctuation folding, whitespace collapse - everything that happens BEFORE slotting.
+function foldText(text) {
+  return String(text)
     .normalize('NFC')
     .replace(/\u00A0/g, ' ') // non-breaking space
     .replace(/[\u2018\u2019\u201A\u201B]/g, "'") // curly single quotes
@@ -71,17 +85,38 @@ function normalizeText(text) {
     .replace(/[\u2013\u2014]/g, '-') // en/em dash
     .replace(/\u2026/g, '...') // ellipsis
     .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/(?:https?:\/\/|www\.)\S+/gi, '<var>') // URLs
-    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<var>'); // emails
+    .trim();
+}
 
-  if (process.env.CACHE_KEY_SLOT_NUMBERS === 'true') {
-    return base
-      .replace(/\b\d{4}-\d{2}-\d{2}\b/g, '<var>') // ISO dates
-      .replace(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g, '<var>') // slash dates
-      .replace(/\b\d+(?:\.\d+)?\b/g, '<var>'); // numbers
+function normalizeText(text) {
+  let out = foldText(text);
+  for (const slotter of SLOTTERS) {
+    if (slotter.gated && !numbersSlottingEnabled()) continue;
+    // String.prototype.replace with a /g regex resets lastIndex, so sharing these regex objects
+    // between calls is safe (unlike .test()/.exec(), which are stateful - hence match() below).
+    out = out.replace(slotter.re, '<var>');
   }
-  return base;
+  return out;
+}
+
+// Which slotting steps WOULD fire for this request, for the R4 measurement.
+//
+// Reports gated steps even when the gate is off, on purpose: that is the only way to price turning
+// number/date slotting ON without turning it on, which is exactly the shape of the decision waiting
+// for data. It reports what the rules MATCH, not what changed the key - a prompt with no URL and one
+// with three URLs are both "url fired", and the hit-rate split is what is being measured.
+function slottingFlags(messages) {
+  const flags = { url: 0, email: 0, date: 0, number: 0, numbers_gate: numbersSlottingEnabled() ? 1 : 0 };
+  if (!Array.isArray(messages)) return flags;
+  for (const message of messages) {
+    if (!message || typeof message.content !== 'string') continue;
+    const folded = foldText(message.content);
+    for (const slotter of SLOTTERS) {
+      if (flags[slotter.name]) continue; // already known to fire; no need to scan again
+      if (folded.match(slotter.re)) flags[slotter.name] = 1;
+    }
+  }
+  return flags;
 }
 
 // The fields that change the SHAPE of an answer rather than its content, defined ONCE because two
@@ -131,6 +166,7 @@ function buildCacheKey(scope, payload) {
 module.exports = {
   buildCacheKey,
   shapeFields,
+  slottingFlags,
   normalizeMessages,
   normalizeText,
 
