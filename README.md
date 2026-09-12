@@ -35,9 +35,7 @@ fills instead:
 
 - **Not a hosted service.** There's no cloud offering, no login, no
   billing, no multi-tenant key custody here — this is the engine you
-  run yourself. A hosted product built on this engine is a separate
-  project — not part of this repository, and not something this one
-  will ever grow into. This project intentionally doesn't ship the pieces (billing,
+  run yourself. This project intentionally doesn't ship the pieces (billing,
   multi-tenant key custody, a login system) that a competing hosted
   offering would need, and isn't looking for PRs that add them (see
   `CONTRIBUTING.md`'s scope note) — not because the license forbids it

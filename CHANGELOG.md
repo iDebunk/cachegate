@@ -6,6 +6,11 @@ uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-09-12
+
+### Removed
+- README no longer advertises a hosted product that is not launched.
+
 ## [1.4.0] - 2026-09-12
 
 The **features** in this release are additive and opt-in — each ships gated off by default (an env
