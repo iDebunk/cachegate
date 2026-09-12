@@ -6,6 +6,16 @@ uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-12
+
+The **features** in this release are additive and opt-in — each ships gated off by default (an env
+var, or a value that matches today's behavior), so an existing deployment that changes nothing gets
+no new behavior out of them.
+
+**One change here is NOT opt-in, and that is deliberate.** The `trust proxy` default flipped from
+`1` to `false` — a fail-open to fail-closed security fix. Read the upgrade note below before
+upgrading if anything sits in front of this service.
+
 ### Changed — UPGRADE NOTE for proxied deployments
 - **`trust proxy` is now configurable, and its default is secure rather than convenient.** It was
   hardcoded to `1`: correct for a single reverse proxy, wrong for the topology this repo's README
@@ -18,6 +28,7 @@ uses [semantic versioning](https://semver.org/).
   unparseable value now refuses to start rather than silently changing limiter scope, and a Render
   deployment gets a boot-time warning when it is unset. The Cloud deployment must set it explicitly
   in its own `render.yaml` / `RENDER-ENV-MAP.md`.
+
 
 ### Added
 - **A slotting measurement line, so the URL/email slotting decision can be made on data instead of
@@ -33,26 +44,6 @@ uses [semantic versioning](https://semver.org/).
     and the reporting read, so the measurement cannot drift from the behaviour it measures. The existing
     key tests are the regression guard: they are unchanged and still pass.
 
-### Fixed
-- **The semantic cache could serve a plain-text answer to a `json_object` caller.** The exact cache
-  keyed `response_format`; the semantic path never did. A caller that asked for JSON could receive
-  cached prose, fail to parse it, and surface the failure as an upstream outage rather than a cache
-  miss. Matching there is by embedding, so the shape cannot live in a key: it is now stored beside
-  each entry and enforced as a hard filter. The allowed direction is asymmetric ON PURPOSE — a
-  request that demands nothing about the answer's shape can still be served an entry that predates
-  the gate (so the upgrade is not a cache flush), while a request that *does* demand a shape may only
-  be served by an entry that proves it matches. The answer-shape fields (`tools`, `tool_choice`,
-  `response_format`, `seed`) are now defined once in `cache.js` and called by both paths, because
-  adding them one at a time is exactly how the two drifted apart.
-
-## [1.4.0] - 2026-09-06
-
-Everything below is additive and opt-in — every new feature ships
-gated off by default (an env var, or a value that matches today's
-behavior), so an existing deployment that changes nothing is
-byte-identical in observable behavior to 1.3.1.
-
-### Added
 - **Two more providers — DeepSeek and OpenRouter** — and a provider registry
   (`providers/index.js`) underneath them. Requests are still routed purely by
   the model name: `deepseek-*` (e.g. `deepseek-flash`, `deepseek-v4-pro`) goes
@@ -141,6 +132,16 @@ byte-identical in observable behavior to 1.3.1.
   attempt.
 
 ### Fixed
+- **The semantic cache could serve a plain-text answer to a `json_object` caller.** The exact cache
+  keyed `response_format`; the semantic path never did. A caller that asked for JSON could receive
+  cached prose, fail to parse it, and surface the failure as an upstream outage rather than a cache
+  miss. Matching there is by embedding, so the shape cannot live in a key: it is now stored beside
+  each entry and enforced as a hard filter. The allowed direction is asymmetric ON PURPOSE — a
+  request that demands nothing about the answer's shape can still be served an entry that predates
+  the gate (so the upgrade is not a cache flush), while a request that *does* demand a shape may only
+  be served by an entry that proves it matches. The answer-shape fields (`tools`, `tool_choice`,
+  `response_format`, `seed`) are now defined once in `cache.js` and called by both paths, because
+  adding them one at a time is exactly how the two drifted apart.
 - **Security**: the local-embeddings dependency was originally wired
   through `@xenova/transformers`, which pulls a critical CVE
   (`protobufjs` < 7.5.5, CVSS 9.8, arbitrary code execution) via
