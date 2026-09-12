@@ -15,8 +15,7 @@
 // exactly as before, unchanged, in server.js. Nothing here overrides an
 // explicit choice - virtual models are opt-in.
 
-const anthropicProvider = require('./providers/anthropic');
-const openaiProvider = require('./providers/openai');
+const providers = require('./providers');
 const metrics = require('./metrics');
 
 // A tier groups equivalent-capability models across providers - the
@@ -90,8 +89,18 @@ function loadStrategy() {
   return raw;
 }
 
+// Normalizes an estimated cost for comparison: a real number sorts on its
+// own value, anything else (null - an estimator that ran but couldn't price
+// this model, e.g. OpenRouter on an id it has no rate for - or a missing
+// estimator entirely) sorts LAST. Found in review: `a.estimatedCostUsd -
+// b.estimatedCostUsd` on a `null` silently coerces to `0 - b`, which ranks
+// an UNKNOWN price as free - the opposite of "unknown, so don't prefer it."
+function comparableCost(candidate) {
+  return typeof candidate.estimatedCostUsd === 'number' ? candidate.estimatedCostUsd : Infinity;
+}
+
 function byCostAscending(a, b) {
-  return a.estimatedCostUsd - b.estimatedCostUsd;
+  return comparableCost(a) - comparableCost(b);
 }
 
 function byLatencyThenCost(a, b) {
@@ -130,10 +139,15 @@ function isVirtualModel(model) {
   return typeof model === 'string' && model.startsWith('router:');
 }
 
+// Routes through the provider registry (providers/index.js) instead of
+// naming providers here, so a new provider needs no edit in this file to be
+// cost-ranked. Found in review: this hardcoded anthropic/openai only, so
+// adding deepseek/openrouter to the registry never wired them into cost
+// estimation - every candidate on either got `null` here -> Infinity below
+// -> always ranked last, silently defeating the point of adding them.
 function estimatorFor(provider) {
-  if (provider === 'anthropic') return anthropicProvider.estimateCost;
-  if (provider === 'openai') return openaiProvider.estimateCost;
-  return null;
+  const mod = providers.get(provider);
+  return mod ? mod.estimateCost : null;
 }
 
 // A fixed token assumption used ONLY to compare candidates against each
