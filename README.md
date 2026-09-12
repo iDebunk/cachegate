@@ -7,12 +7,6 @@ A self-hostable, OpenAI-compatible proxy that routes LLM requests to the
 cheapest currently-healthy provider, caches responses both exactly and
 semantically, and tracks cost and latency per call.
 
-Would rather not run it yourself? [Cachegate Cloud](https://cachegate.memocodesystem.com)
-is a hosted version of this same engine — BYOK, so you're never paying
-us for tokens, only for the caching/routing layer on top. Everything
-below in this README describes the engine itself; both this repo and
-the hosted product share it.
-
 ## Why this instead of LiteLLM / Portkey / OpenRouter?
 
 Those are all excellent, and this doesn't try to out-feature them (140+
@@ -41,10 +35,9 @@ fills instead:
 
 - **Not a hosted service.** There's no cloud offering, no login, no
   billing, no multi-tenant key custody here — this is the engine you
-  run yourself. If you want that instead, [Cachegate Cloud](https://cachegate.memocodesystem.com)
-  is a separate, closed product built on top of this same engine — not
-  a fork of this one, and not something this repository will ever grow
-  into. This project intentionally doesn't ship the pieces (billing,
+  run yourself. A hosted product built on this engine is a separate
+  project — not part of this repository, and not something this one
+  will ever grow into. This project intentionally doesn't ship the pieces (billing,
   multi-tenant key custody, a login system) that a competing hosted
   offering would need, and isn't looking for PRs that add them (see
   `CONTRIBUTING.md`'s scope note) — not because the license forbids it
