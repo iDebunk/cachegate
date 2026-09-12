@@ -18,11 +18,11 @@ name: Release
 # published, is a no-op (checked BEFORE building anything), so
 # re-running this workflow or reverting a version bump can never
 # re-publish or downgrade what's live.
-on:
-  push:
-    branches: [main]
-    paths:
-      - package.json
+# on:
+  # push:
+    # branches: [main]
+    # paths:
+      # - package.json
   # Manual escape hatch: run from the Actions tab (or the API) without
   # needing a throwaway package.json edit to fire the path filter above
   # - e.g. to publish a version bump that landed before this workflow
