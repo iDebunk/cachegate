@@ -229,5 +229,5 @@ async function chatStream(client, payload, { onDelta, signal } = {}) {
 
 module.exports = {
   buildClient, chat, chatStream, applyStreamChunk, estimateCost,
-  isOpenRouterModel, normalizeModel, refreshPricing, setPricingTable, attributionHeaders, BASE_URL
+  isOpenRouterModel, normalizeModel, refreshPricing, setPricingTable, attributionHeaders, BASE_URL, PRICING_TTL_MS
 };

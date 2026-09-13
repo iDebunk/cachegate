@@ -1264,6 +1264,14 @@ if (require.main === module) {
     console.log(`🗄️ Metrics storage: ${metrics.usingPostgres() ? 'Postgres' : 'local JSONL'}`);
     runScheduledPrune();
     setInterval(runScheduledPrune, PRUNE_INTERVAL_MS);
+    // OpenRouter pricing must be refreshed for cost-based routing to price its candidates. Until the
+    // first fetch, estimateCost() returns null and an OpenRouter candidate can never win a router:cost
+    // comparison (it only ever sorts last as "unknown"). Refresh at boot, then on the provider's TTL.
+    const openrouterMod = providers.get('openrouter');
+    if (openrouterMod && typeof openrouterMod.refreshPricing === 'function') {
+      openrouterMod.refreshPricing().catch(() => {});
+      setInterval(() => openrouterMod.refreshPricing().catch(() => {}), openrouterMod.PRICING_TTL_MS);
+    }
   });
 }
 
