@@ -18,6 +18,36 @@ uses [semantic versioning](https://semver.org/).
   self-signed/private-CA certificate and neither new variable set will fail to connect after
   upgrading, by design — the alternative (staying silently unverified) is the finding this fixes.
 
+## [1.4.2] - 2026-09-13
+
+### Security
+- Scrubbed private product/company names and a private domain link out of every public comment and
+  doc that had them — `server.js`, `metrics.js`, `redisClient.js`, `streaming.js`, `README.md`,
+  `CHANGELOG.md`, `CONTRIBUTING.md`, and three test files. These were all technical explanations
+  ("this decision was made for one specific hosted deployment's topology," etc.) generalized to
+  describe the pattern rather than name the deployment — no technical content was removed, only the
+  private names. `CONTRIBUTING.md`'s link to that deployment's own domain is gone entirely.
+- Removed `.github/ISSUE_TEMPLATE/beta-feedback.md` — a closed-beta feedback template for a private
+  hosted product's own account/plan-limit fields, misplaced in this public repo. This repo already
+  has its own `bug_report.md`/`feature_request.md`; this one didn't belong here at all.
+
+### Fixed
+- `npm run eval:semantic-cache` was broken in the published package — `eval/` was never in
+  `package.json`'s `files` list, so the script it runs didn't exist post-`npm install`. Added
+  `eval/semantic-cache-eval.js` and its data file (not the `.test.js`, which isn't needed at runtime).
+
+### Docs
+- `SECURITY.md` no longer claims this project is "pre-1.0" (it's 1.4.x) or defers naming supported
+  versions to a future 1.0 release that already happened several versions ago. Also dropped a stale
+  maintainer-only setup note that should have been removed before this repo went public.
+- `CONTRIBUTING.md`'s "Releasing" section described an automatic push-triggered release; the actual
+  trigger has been manual-only (`workflow_dispatch`) since an earlier, undocumented change — corrected
+  to describe the real procedure (bump the version, merge, then run the workflow from the Actions tab).
+- `.github/workflows/release.yml`'s own header comment claimed "this repo has never tagged a release,
+  zero tags" — no longer true (v1.3.1, v1.4.0, v1.4.1 all exist, created by this same workflow's own
+  tagging step) — and fixed a latent YAML structure issue (`workflow_dispatch` was indented under a
+  fully-commented-out `on:` key; GitHub's own parser tolerated it, a stricter one wouldn't).
+
 ## [1.4.1] - 2026-09-12
 
 ### Removed
@@ -198,7 +228,7 @@ upgrading if anything sits in front of this service.
   own IP for every caller instead of each real client — brute-force/
   abuse limiting was effectively shared across all callers rather than
   per-caller. Found running this in production behind a single-hop
-  proxy (Cachegate Cloud, 2026-09-04).
+  proxy.
 - `metrics.record()` now returns the underlying Postgres INSERT promise
   instead of discarding it, so tests/scripts can `await` it. Request
   paths still ignore the return value, so it stays fire-and-forget for

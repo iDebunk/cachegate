@@ -10,9 +10,8 @@ you a round-trip.
 just a marketing caveat: **no login, no billing, no multi-tenant key
 custody, no hosted service** live in this repository, and a PR adding
 any of those will be closed regardless of how well it's built — that
-functionality belongs to [Cachegate Cloud](https://cachegate.memocodesystem.com),
-a separate, closed product built on top of this engine, not this
-engine itself. This isn't a licensing restriction (MIT permits
+functionality belongs to a separate, closed hosted product built on top
+of this engine, not this engine itself. This isn't a licensing restriction (MIT permits
 building any of that — see `LICENSE`); it's that this repository
 specifically isn't going to grow into a hosted competitor to its own
 paid product, so a PR heading that direction gets closed here
@@ -88,25 +87,33 @@ tagged release once that happens.
 
 ## Releasing (maintainers)
 
-Publishing to npm, GHCR, and Docker Hub is automated by
-`.github/workflows/release.yml` — bump `"version"` in `package.json`,
-add the matching section to `CHANGELOG.md`, and push (or merge) to
-`main`. The workflow diffs `package.json`'s version against what's
-currently live on npm *before* doing anything else, so a push that
-doesn't bump the version, or bumps it to a version already published,
-is a safe no-op — nothing rebuilds or republishes. When it does detect
-a real bump: the full test suite must pass, then it publishes to npm
-and pushes `ghcr.io/idebunk/cachegate` + `docker.io/shipman/cachegate`
-(both `latest` and the version tag), then best-effort tags the commit
-and opens a GitHub Release with that version's `CHANGELOG.md` section
-as the body.
+Publishing to npm, GHCR, and Docker Hub is handled by
+`.github/workflows/release.yml`, run **manually** from the Actions tab
+(`Release` → `Run workflow`) — it does not fire automatically on a push
+or merge to `main`, by deliberate choice: an earlier version of this
+workflow triggered on any push that bumped `package.json`'s version,
+and that automatic trigger has since been disabled in favor of an
+explicit run. Before triggering it: bump `"version"` in `package.json`,
+add the matching section to `CHANGELOG.md`, and merge that to `main` —
+then run the workflow against `main`.
+
+The workflow diffs `package.json`'s version against what's currently
+live on npm before doing anything else, so running it without a real
+version bump (or a version already published) is a safe no-op — nothing
+rebuilds or republishes. Its own `force` input exists for retrying a
+partial failure (e.g. npm succeeded but Docker didn't) without needing
+a throwaway version bump. When it does detect a real bump: the full
+test suite must pass, then it publishes to npm and pushes
+`ghcr.io/idebunk/cachegate` + `docker.io/shipman/cachegate` (both
+`latest` and the version tag), then best-effort tags the commit and
+opens a GitHub Release with that version's `CHANGELOG.md` section as
+the body.
 
 There is no other release path — a manual `npm publish` or
 `docker push` from a laptop is exactly how 1.3.1 ended up sitting
-unreleased on `main` after 1.3.0 shipped (two real fixes, `#4` and
-`#5`, live in every self-hosted deployment's source but not in what
-`npm install cachegate` or `docker pull` actually served). Use the
-workflow, not a local publish.
+unreleased on `main` after 1.3.0 shipped (two real fixes live in every
+self-hosted deployment's source but not in what `npm install cachegate`
+or `docker pull` actually served). Use the workflow, not a local publish.
 
 ## Reporting a bug vs. reporting a security issue
 
