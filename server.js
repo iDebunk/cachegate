@@ -91,11 +91,11 @@ function redactMessages(messages) {
 const app = express();
 // Step 36 (observability): initialize OTel once, at module load. A no-op
 // unless OTEL_ENABLED + OTEL_EXPORTER_OTLP_ENDPOINT are both set (see
-// tracing.js) - so both the standalone server and a wrapping deployment
-// (cachegate-cloud's cloud-server.js) get tracing without any extra call.
+// tracing.js) - so both the standalone server and a wrapping deployment's
+// own entry point get tracing without any extra call.
 tracing.initTracing();
 // `trust proxy`, now CONFIGURABLE and secure by default. The previous hardcoded `1` was chosen for
-// Cachegate Cloud's single-hop topology (2026-09-04) and is right THERE, but it is the wrong default
+// one specific hosted deployment's single-hop topology (2026-09-04) and is right THERE, but it is the wrong default
 // for the topology this engine's own README documents (`docker run -p 4000:4000`: no proxy at all).
 // In that topology `1` trusts a client-controlled X-Forwarded-For, so any caller can present a fresh
 // IP on every request and the per-IP limiter on the key-holding routes is defeated - fail-OPEN, and
@@ -103,9 +103,9 @@ tracing.initTracing();
 // away from correct. Every other security decision in this file fails closed (no DATABASE_URL, no
 // API_KEY_ENCRYPTION_SECRET, auth) and this should not be the exception.
 //
-// Deployment note: a proxied deployment MUST now set TRUST_PROXY explicitly - Cachegate Cloud sets
-// TRUST_PROXY=1 in render.yaml and RENDER-ENV-MAP.md. Upgrade impact is a boot-time warning on Render
-// (see below) plus a CHANGELOG entry, not a silent change of limiter scope.
+// Deployment note: a proxied deployment MUST now set TRUST_PROXY explicitly - a real deployment
+// behind Render's proxy sets TRUST_PROXY=1 in its own render.yaml. Upgrade impact is a boot-time
+// warning on Render (see below) plus a CHANGELOG entry, not a silent change of limiter scope.
 function resolveTrustProxy(raw) {
   const value = raw == null ? '' : String(raw).trim();
   if (value === '') {
@@ -145,8 +145,8 @@ app.set('trust proxy', resolveTrustProxy(process.env.TRUST_PROXY));
 // benefit).
 app.disable('x-powered-by');
 
-// Defense-in-depth backstop, the same treatment the MemoCode backend
-// already carries (its PRs #67/#71): Express 4 does NOT route an async
+// Defense-in-depth backstop, the same treatment a wrapping backend deployment
+// already carries: Express 4 does NOT route an async
 // route handler's rejected promise to the error middleware at the bottom
 // of this file - left unguarded, Node's default since v15 is to crash
 // the whole process, taking every other in-flight request with it. The
@@ -203,7 +203,7 @@ function constantTimeEqual(a, b) {
 // A deployer needing real multi-tenancy (issued-key auth instead of one
 // shared internal key, per-tenant BYOK provider keys, per-tenant rate
 // limiting) overrides these via configure() below instead of forking
-// this file - the fork this project's own Cachegate Cloud build had to
+// this file - the fork a real hosted deployment had to
 // maintain until now, duplicating every one of these decisions across a
 // full copy of server.js. Every default here is EXACTLY today's
 // single-tenant, unconfigured behavior - never calling configure()
@@ -231,7 +231,7 @@ const seams = {
   // today's single shared process.env key, the same for every scope. A
   // BYOK-style deployer overrides this to look the key up per-scope
   // instead - and since a real per-scope lookup is usually a database
-  // read (Cachegate Cloud's is a Postgres fetch + decrypt), the resolver
+  // read (a real BYOK deployment's is typically a Postgres fetch + decrypt), the resolver
   // may return a Promise; every call site below awaits it, which is a
   // no-op for a synchronous resolver, so both shapes are first-class.
   // (See the callers below: they never cache a client built from a
@@ -277,11 +277,11 @@ async function requireInternalKey(req, res, next) {
 // internal key) has no ceiling today. Defaults are deliberately
 // generous for real usage and overridable per deployment.
 //
-// The embedded deployment (this app's own MemoCode instance) has
-// exactly ONE caller identity - memocode-backend, one service, one
-// outbound IP - which means express-rate-limit's default per-IP
-// keying doesn't separate individual end users at all: this ceiling is
-// shared across EVERY MemoCode user's combined traffic, not per person.
+// An embedded deployment (this engine running inside another app's own
+// backend) has exactly ONE caller identity - one service, one outbound
+// IP - which means express-rate-limit's default per-IP keying doesn't
+// separate individual end users at all: this ceiling is shared across
+// EVERY end user's combined traffic, not per person.
 // 60/60s (the original default) turned out to be uncomfortably close
 // to what a single legitimate action can burst on its own: PDF
 // summarize dispatches one call per chapter, sequentially, up to
@@ -297,8 +297,8 @@ async function requireInternalKey(req, res, next) {
 // multi-tenancy step the router's own docs already flag as future
 // scope (see ROADMAP.md's embedded/standalone split), not something
 // this single-app deployment needs yet. Note for a STANDALONE
-// self-hoster (as opposed to MemoCode's own single-caller embedded
-// deployment the paragraph above describes): if your own callers each
+// self-hoster (as opposed to the single-caller embedded deployment
+// the paragraph above describes): if your own callers each
 // have distinct outbound IPs, this same per-IP default DOES separate
 // them from each other - the "shared ceiling" caveat above is specific
 // to a deployment with exactly one caller identity, not a general
@@ -312,12 +312,20 @@ async function requireInternalKey(req, res, next) {
 // (ipKeyGenerator) when never configured - not a bare `req.ip`, which
 // the library itself warns can let IPv6 users bypass limits (same
 // default it would have used had this option been omitted entirely).
+// Shared by every limiter in this file - review finding: readEndpointLimiter
+// below was defined without this at all, silently falling back to
+// express-rate-limit's OWN default, which is the bare `req.ip` the comment
+// above warns about - the exact IPv6 bypass this function exists to avoid,
+// present on /stats and /dashboard/data while /v1 was fixed. Pulled out
+// once so the two limiters can no longer drift apart on this again.
+const ipv6SafeKeyGenerator = (req, res) => (seams.rateLimitKeyGenerator ? seams.rateLimitKeyGenerator(req, res) : rateLimit.ipKeyGenerator(req.ip));
+
 const rateLimiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 60_000,
   limit: Number(process.env.RATE_LIMIT_MAX) || 300,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req, res) => (seams.rateLimitKeyGenerator ? seams.rateLimitKeyGenerator(req, res) : rateLimit.ipKeyGenerator(req.ip)),
+  keyGenerator: ipv6SafeKeyGenerator,
   message: { error: 'Too many requests - rate limit exceeded' }
 });
 
@@ -334,6 +342,7 @@ const readEndpointLimiter = rateLimit({
   limit: Number(process.env.READ_RATE_LIMIT_MAX) || 120,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: ipv6SafeKeyGenerator,
   message: { error: 'Too many requests - rate limit exceeded' }
 });
 
@@ -1249,4 +1258,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, isAuthConfigured, resolveEnvPathFromArgv, resolveTrustProxy, configure };
+module.exports = { app, isAuthConfigured, resolveEnvPathFromArgv, resolveTrustProxy, configure, ipv6SafeKeyGenerator };

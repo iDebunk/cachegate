@@ -42,12 +42,12 @@ const ready = new Promise((resolve) => { readyResolve = resolve; });
 // including the automatic-reconnect loop after the socket dies - gating
 // cache reads/writes on it lets every command queue on a dead socket and
 // hang the request instead of failing open. `isReady` is true only when
-// a command can actually execute right now. Live-verified in the
-// Cachegate Cloud build (its PR #12 review): with isOpen, a stopped
-// Redis hung /v1 requests for 2+ minutes; with isReady the same request
-// returned in 11ms, correctly skipping the cache. This is the backport
-// of that fix - the cloud vendored this engine and fixed its copy first;
-// the engine and the public cachegate repo still shipped the bug.
+// a command can actually execute right now. Live-verified in a real
+// hosted deployment: with isOpen, a stopped Redis hung /v1 requests for
+// 2+ minutes; with isReady the same request returned in 11ms, correctly
+// skipping the cache. This is the backport of that fix - a downstream
+// vendored copy of this engine caught and fixed it first; this repo
+// still shipped the bug until now.
 function isConnected() {
   return client.isReady;
 }

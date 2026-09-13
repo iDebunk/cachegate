@@ -1,11 +1,11 @@
-// R3, from the four-repo review (2026-09-10): `trust proxy` must be configurable, and its default must
-// be secure rather than convenient.
+// `trust proxy` must be configurable, and its default must be secure rather than convenient.
 //
-// The regression this pins: it was hardcoded to `1`. That is correct for Cachegate Cloud's single-hop
-// topology and WRONG for the topology this repo's own README documents (`docker run -p 4000:4000`, no
-// proxy). There, `1` tells express to trust X-Forwarded-For, which is client-controlled, so any caller
-// can present a fresh IP on every request and the per-IP limiter on the key-holding routes is defeated
-// - fail-OPEN, silent, and exactly the sort of thing nobody notices until it is exploited.
+// The regression this pins: it was hardcoded to `1`. That is correct for one specific hosted
+// deployment's single-hop topology and WRONG for the topology this repo's own README documents
+// (`docker run -p 4000:4000`, no proxy). There, `1` tells express to trust X-Forwarded-For, which is
+// client-controlled, so any caller can present a fresh IP on every request and the per-IP limiter on
+// the key-holding routes is defeated - fail-OPEN, silent, and exactly the sort of thing nobody notices
+// until it is exploited.
 //
 // `false` behind a real proxy is fail-CLOSED and loud: the limiter keys globally, one env var away
 // from correct. So the default is false, every other security decision in server.js already fails
