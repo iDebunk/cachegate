@@ -6,6 +6,18 @@ uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+- Postgres-backed metrics (`DATABASE_URL`/`MEMOCODE_ROUTER_DATABASE_URL`) now verifies the server's TLS
+  certificate by default (`rejectUnauthorized: true`) instead of the previous hardcoded
+  `rejectUnauthorized: false` — encrypted-but-unverified is no longer the only option. Most managed
+  Postgres providers (RDS, Neon, Supabase) need no further config; a provider that issues a
+  self-signed certificate per instance instead (Render's managed Postgres is a confirmed example)
+  needs `PGSSL_CA` or `PGSSL_CA_PATH` set to that CA. `PGSSL_INSECURE=true` is the explicit, loud
+  escape hatch back to the old behavior for a deployment that can't set either yet — see
+  `.env.example`. **Not fully opt-in**: a self-hosted deployment already pointed at a Postgres with a
+  self-signed/private-CA certificate and neither new variable set will fail to connect after
+  upgrading, by design — the alternative (staying silently unverified) is the finding this fixes.
+
 ## [1.4.1] - 2026-09-12
 
 ### Removed

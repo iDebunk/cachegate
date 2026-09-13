@@ -57,16 +57,59 @@ function usingPostgres() {
   return Boolean(process.env.DATABASE_URL || process.env.MEMOCODE_ROUTER_DATABASE_URL);
 }
 
+// PGSSL_CA / PGSSL_CA_PATH: opt-in custom CA for verifying a hosted
+// Postgres whose certificate isn't signed by a publicly-trusted root - a
+// self-signed cert some managed providers issue per database instance
+// (confirmed live, 2026-09-13: Render's managed Postgres is one). PGSSL_CA
+// takes the certificate's own PEM content directly (handy on hosts that
+// inject env vars but not files); PGSSL_CA_PATH reads it from a file
+// instead (handy when it's already committed/mounted as one). Neither set
+// means the default Node trust store alone - correct and sufficient for
+// any provider whose cert chains to a public root (RDS, Neon, Supabase,
+// most managed Postgres).
+function resolvePgCa() {
+  if (process.env.PGSSL_CA) return process.env.PGSSL_CA;
+  if (process.env.PGSSL_CA_PATH) {
+    try {
+      return fs.readFileSync(process.env.PGSSL_CA_PATH, 'utf8');
+    } catch (err) {
+      throw new Error(`PGSSL_CA_PATH is set to "${process.env.PGSSL_CA_PATH}" but could not be read: ${err.message}`);
+    }
+  }
+  return null;
+}
+
+// Review finding: this used to be a hardcoded { rejectUnauthorized: false }
+// - TLS encrypted the connection but never verified WHO it was talking to,
+// for every deployment, with no way to opt into real verification even
+// with the right CA in hand. Default is now secure (rejectUnauthorized:
+// true, the public trust store) - correct out of the box for any provider
+// on a publicly-trusted CA. A provider whose cert isn't (self-signed,
+// issued per-instance) needs PGSSL_CA or PGSSL_CA_PATH set to that CA -
+// see resolvePgCa() above. PGSSL_INSECURE=true is the explicit, loud
+// escape hatch for a deployment that can't do either right now: the same
+// old behavior, but it can no longer happen by accident or silently.
+function pgSslConfig(connectionString) {
+  if (!connectionString || /localhost|127\.0\.0\.1/.test(connectionString)) return false;
+  if (process.env.PGSSL_INSECURE === 'true') {
+    console.warn(
+      "⚠️ PGSSL_INSECURE=true: Postgres TLS certificate verification is OFF. " +
+      "This connection is encrypted but the server's identity is NOT checked. " +
+      'Set PGSSL_CA or PGSSL_CA_PATH instead as soon as you can.'
+    );
+    return { rejectUnauthorized: false };
+  }
+  const ca = resolvePgCa();
+  return ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: true };
+}
+
 let pgPool = null;
 function getPool() {
   if (!pgPool) {
     const connectionString = process.env.MEMOCODE_ROUTER_DATABASE_URL || process.env.DATABASE_URL;
     pgPool = new Pool({
       connectionString,
-      // Same rule db.mjs already uses: a real hosted Postgres (Render's
-      // managed instance) needs SSL; a local one (dev, this module's
-      // own tests) doesn't and would just fail the handshake if asked.
-      ssl: connectionString && !/localhost|127\.0\.0\.1/.test(connectionString) ? { rejectUnauthorized: false } : false
+      ssl: pgSslConfig(connectionString)
     });
   }
   return pgPool;
@@ -739,5 +782,6 @@ module.exports = {
   usingPostgres,
   matchesScope,
   closePostgresPoolForTests,
+  pgSslConfig,
   DATA_DIR
 };
