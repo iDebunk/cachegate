@@ -58,6 +58,45 @@ test('pickCandidate exposes the full ranked candidate list, in the same order as
   assert.equal(decision.rankedCandidates[0].model, decision.model);
 });
 
+// Regression (review finding): estimatorFor() hardcoded anthropic/openai and
+// never consulted the provider registry, so every deepseek/openrouter
+// candidate priced at Infinity and was always ranked last regardless of its
+// real cost - the DEFAULT_TIERS-only tests above never caught this because
+// neither default tier contains a third-party provider. A naive fix (just
+// wiring estimatorFor to the registry) reintroduces a second bug: OpenRouter
+// legitimately returns `null` (not a number) for a model it has no price
+// for, and `null - realCost` coerces to `0 - realCost`, ranking the UNKNOWN
+// price as free. This tier exercises both at once: deepseek must win on its
+// real (and, at these comparison tokens, always-cheaper-than-Haiku) price,
+// and the unpriced openrouter candidate must rank LAST, not first.
+test('pickCandidate ranks a deepseek/openrouter/anthropic tier by real cost, with the unpriced OpenRouter candidate sorted last (not free)', async () => {
+  // try/finally, not a trailing delete: an assertion failure below must not
+  // leak ROUTER_TIERS_JSON into every test that runs after this one.
+  try {
+    process.env.ROUTER_TIERS_JSON = JSON.stringify({
+      'router:mixed-providers': [
+        { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+        { provider: 'deepseek', model: 'deepseek-flash' },
+        // No entry in openrouter's pricing table in a test process (it's
+        // never fetched) - estimateCost() returns null for this on purpose.
+        { provider: 'openrouter', model: 'meta-llama/llama-3-70b' }
+      ]
+    });
+    const { router } = freshModules(tempLogPath());
+
+    const decision = await router.pickCandidate('router:mixed-providers');
+    assert.equal(decision.provider, 'deepseek', 'deepseek must be considered, not force-ranked last by a missing estimator');
+    assert.equal(decision.model, 'deepseek-flash');
+    assert.deepEqual(decision.rankedCandidates, [
+      { provider: 'deepseek', model: 'deepseek-flash' },
+      { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
+      { provider: 'openrouter', model: 'meta-llama/llama-3-70b' } // unpriced -> last, never free
+    ]);
+  } finally {
+    delete process.env.ROUTER_TIERS_JSON;
+  }
+});
+
 test('pickCandidate skips a candidate whose recent error rate is too high, even if cheaper', async () => {
   const logPath = tempLogPath();
   const { metrics, router } = freshModules(logPath);
