@@ -312,12 +312,20 @@ async function requireInternalKey(req, res, next) {
 // (ipKeyGenerator) when never configured - not a bare `req.ip`, which
 // the library itself warns can let IPv6 users bypass limits (same
 // default it would have used had this option been omitted entirely).
+// Shared by every limiter in this file - review finding: readEndpointLimiter
+// below was defined without this at all, silently falling back to
+// express-rate-limit's OWN default, which is the bare `req.ip` the comment
+// above warns about - the exact IPv6 bypass this function exists to avoid,
+// present on /stats and /dashboard/data while /v1 was fixed. Pulled out
+// once so the two limiters can no longer drift apart on this again.
+const ipv6SafeKeyGenerator = (req, res) => (seams.rateLimitKeyGenerator ? seams.rateLimitKeyGenerator(req, res) : rateLimit.ipKeyGenerator(req.ip));
+
 const rateLimiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 60_000,
   limit: Number(process.env.RATE_LIMIT_MAX) || 300,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req, res) => (seams.rateLimitKeyGenerator ? seams.rateLimitKeyGenerator(req, res) : rateLimit.ipKeyGenerator(req.ip)),
+  keyGenerator: ipv6SafeKeyGenerator,
   message: { error: 'Too many requests - rate limit exceeded' }
 });
 
@@ -334,6 +342,7 @@ const readEndpointLimiter = rateLimit({
   limit: Number(process.env.READ_RATE_LIMIT_MAX) || 120,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: ipv6SafeKeyGenerator,
   message: { error: 'Too many requests - rate limit exceeded' }
 });
 
@@ -1249,4 +1258,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, isAuthConfigured, resolveEnvPathFromArgv, resolveTrustProxy, configure };
+module.exports = { app, isAuthConfigured, resolveEnvPathFromArgv, resolveTrustProxy, configure, ipv6SafeKeyGenerator };
