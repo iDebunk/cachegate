@@ -294,7 +294,34 @@ test('GET /stats requires the internal key and returns aggregate shape', async (
   assert.ok(Array.isArray(authed.body.routing_tiers));
   assert.ok(authed.body.routing_tiers.includes('router:fast-cheap'));
   assert.equal(authed.body.routing_strategy, 'cost'); // no ROUTER_STRATEGY set in this test suite - default applies
-  assert.deepEqual(authed.body.providers, { anthropic: false, openai: false }); // no provider keys set in this test suite
+  // Review finding: this used to hardcode just anthropic/openai, so it
+  // never noticed the /stats route itself had the same hardcode - now
+  // built from the registry, so a future provider needs no test edit
+  // here either, just a real assertion on the current full set.
+  assert.deepEqual(authed.body.providers, { anthropic: false, openai: false, deepseek: false, openrouter: false }); // no provider keys set in this test suite
+});
+
+// Regression for the same finding: a configured key for a THIRD-PARTY
+// provider (not just anthropic/openai) must actually flip its flag to
+// true - proves this isn't just "the right keys appear," but that the
+// value each one reports is real. resolveProviderKey's default reads
+// process.env fresh per call (not cached at require time), so setting
+// env immediately before the request is enough - no re-require needed.
+test('GET /stats reflects a configured deepseek/openrouter key, not just anthropic/openai', async (t) => {
+  const server = await listen();
+  t.after(() => {
+    server.close();
+    delete process.env.DEEPSEEK_API_KEY;
+  });
+  process.env.DEEPSEEK_API_KEY = 'test-deepseek-key';
+
+  const authed = await request(server, {
+    method: 'GET',
+    path: '/stats',
+    headers: { Authorization: 'Bearer test-internal-key' }
+  });
+  assert.equal(authed.status, 200);
+  assert.deepEqual(authed.body.providers, { anthropic: false, openai: false, deepseek: true, openrouter: false });
 });
 
 // Reliability review (2026-09-02): this route's own body used to be one

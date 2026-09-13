@@ -462,10 +462,16 @@ app.get('/stats', requireInternalKey, readEndpointLimiter, async (req, res) => {
       // between them - moved here from the public GET /health (security-
       // review finding, 2026-09-02): this endpoint already requires the
       // internal key, /health never did.
-      providers: {
-        anthropic: Boolean(await seams.resolveProviderKey(req.scope, 'anthropic')),
-        openai: Boolean(await seams.resolveProviderKey(req.scope, 'openai'))
-      },
+      // Review finding: this hardcoded anthropic/openai only, so adding
+      // deepseek/openrouter to the registry never surfaced them here -
+      // an operator checking "which providers have a key configured"
+      // saw a false "no" for either. Built from providers.names() now,
+      // so a future provider needs no edit here to show up.
+      providers: Object.fromEntries(
+        await Promise.all(
+          providers.names().map(async (name) => [name, Boolean(await seams.resolveProviderKey(req.scope, name))])
+        )
+      ),
       routing_tiers: Object.keys(router.loadTiers()),
       routing_strategy: router.loadStrategy()
     });
@@ -1241,7 +1247,10 @@ if (require.main === module) {
   }
   app.listen(PORT, () => {
     console.log(`🚀 cachegate listening on port ${PORT}`);
-    console.log(`📡 Providers: Anthropic=${!!process.env.ANTHROPIC_API_KEY}, OpenAI=${!!process.env.OPENAI_API_KEY}`);
+    // Review finding: this hardcoded anthropic/openai only, so the boot
+    // log silently never mentioned deepseek/openrouter once they existed.
+    // Built from providers.names() now, same fix as /stats above.
+    console.log(`📡 Providers: ${providers.names().map((name) => `${name}=${!!process.env[providers.envKey(name)]}`).join(', ')}`);
     console.log(`💾 Redis cache: ${cache.isConnected() ? 'connected' : 'disabled'}`);
     console.log(`🗄️ Metrics storage: ${metrics.usingPostgres() ? 'Postgres' : 'local JSONL'}`);
     runScheduledPrune();
