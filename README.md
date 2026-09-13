@@ -183,8 +183,8 @@ the folder. Pick **standalone** if cachegate should be one shared
 service serving multiple apps (or you'd rather manage it as its own
 deployable thing). Pick **colocated** if you want everything - your app
 plus its router - in one repo, one place to look, no second project to
-maintain (this is exactly how this router lives inside MemoCode's own
-monorepo today).
+maintain (this is exactly how this router lives inside at least one
+production app's own monorepo today).
 
 **Reaching it once it's running:**
 - Same machine, calling app not containerized: `http://localhost:4000`.
@@ -616,9 +616,9 @@ positioning. A few things worth knowing before relying on it:
   no database of its own, but ephemeral on most hosts (a restart/
   redeploy wipes a container's own filesystem). Set `DATABASE_URL` to a
   real Postgres connection string and every metrics function
-  transparently reads/writes there instead - MemoCode's own embedded
-  deployment points this at its already-provisioned `memocode-db`
-  rather than standing up a separate database just for cost history.
+  transparently reads/writes there instead - a real embedded deployment
+  can point this at its own already-provisioned database rather than
+  standing up a separate one just for cost history.
   Same public API either way (`record`/`readRecent`/`providerStats`/
   `rangeSummary`/`pruneOlderThan`); nothing outside `metrics.js` needs
   to know or care which backend is actually running. Retention is the

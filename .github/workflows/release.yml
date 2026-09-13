@@ -1,32 +1,35 @@
 name: Release
 
-# Publishes npm + GHCR + Docker Hub automatically - the gap that let
-# 1.3.1 (trust-proxy fix, metrics.record() awaitable) sit unreleased on
-# main after 1.3.0 shipped: every prior version (1.0.0-1.3.0) was
-# published by hand, from whoever's machine had the credentials, with
-# no CI record of it at all.
+# Publishes npm + GHCR + Docker Hub - the gap that let 1.3.1 (trust-proxy
+# fix, metrics.record() awaitable) sit unreleased on main after 1.3.0
+# shipped: every prior version (1.0.0-1.3.0) was published by hand, from
+# whoever's machine had the credentials, with no CI record of it at all.
 #
-# Trigger: a push to main that changes package.json's "version" field
-# to something not already live on npm - not a git tag and not a
-# GitHub Release. This repo has never tagged a release (see
-# CHANGELOG.md, the actual versioning record: three prior versions,
-# zero tags), and a tag push from outside a small bypass list gets a
-# flat 403 here (verified directly - branch pushes to main are allowed,
-# `git push origin v1.3.1` was rejected). Gating on the version string
-# itself needs no new push permissions and can't misfire: a push that
-# doesn't touch package.json, or bumps it to a version already
-# published, is a no-op (checked BEFORE building anything), so
-# re-running this workflow or reverting a version bump can never
-# re-publish or downgrade what's live.
-# on:
+# Trigger: manual only (workflow_dispatch, below) - run from the Actions
+# tab (or the API) after bumping package.json's "version" and merging
+# that to main. This workflow originally also triggered automatically on
+# any push to main that changed package.json's "version" field; that
+# push trigger was deliberately disabled (#28) and is left commented out
+# below rather than deleted, in case it's reinstated later. See
+# CONTRIBUTING.md's "Releasing" section for the maintainer-facing
+# procedure this actually implies.
+#
+# Corrected this workflow's own earlier claim that "this repo has never
+# tagged a release, zero tags" - it does now (v1.3.1, v1.4.0, v1.4.1), because
+# this workflow's own best-effort tagging step (below) creates them; that
+# was never a reason to prefer version-string gating over a tag-push
+# trigger, just a true statement about history at the time this was
+# written. Gating on the version string itself still needs no new push
+# permissions and can't misfire: a push that doesn't touch package.json,
+# or bumps it to a version already published, is a no-op (checked BEFORE
+# building anything), so re-running this workflow or reverting a version
+# bump can never re-publish or downgrade what's live - that part still
+# holds regardless of trigger.
+on:
   # push:
-    # branches: [main]
-    # paths:
-      # - package.json
-  # Manual escape hatch: run from the Actions tab (or the API) without
-  # needing a throwaway package.json edit to fire the path filter above
-  # - e.g. to publish a version bump that landed before this workflow
-  # existed, or to retry after adding/rotating a secret.
+  #   branches: [main]
+  #   paths:
+  #     - package.json
   workflow_dispatch:
     inputs:
       force:
