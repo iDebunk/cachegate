@@ -17,7 +17,7 @@
 // cache_type) beyond real OpenAI's wire format - the same deviation the
 // non-streaming JSON response already makes. This proxy is
 // OpenAI-COMPATIBLE in request/response SHAPE, not a byte-for-byte
-// clone of OpenAI's actual API; MemoCode's own callers need the cost
+// clone of OpenAI's actual API; this proxy's own callers need the cost
 // data, and no spec-compliant client chokes on unknown extra JSON
 // fields it doesn't look for.
 
