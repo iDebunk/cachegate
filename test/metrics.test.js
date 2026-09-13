@@ -338,10 +338,10 @@ test('computeSavings() applies the per-model formula: avg miss cost × hits, sum
   ];
   // Tolerance, not assert.equal: (0.01+0.03)/2 isn't exactly representable
   // in floating point, so the real result is 0.12000000000000001, not a
-  // clean 0.12 - same convention cachegate-cloud's usage.test.mjs already
-  // uses for this exact class of money-math assertion. assert.equal here
-  // fails deterministically on every platform (caught by this PR's own
-  // CI, not a flake) - it's the test that was wrong, not computeSavings().
+  // clean 0.12 - same convention a wrapping deployment's own usage.test.mjs
+  // already uses for this exact class of money-math assertion. assert.equal
+  // here fails deterministically on every platform, not a flake - it's the
+  // test that was wrong, not computeSavings().
   assert.ok(Math.abs(metrics.computeSavings(rows).total - 0.12) < 1e-9);
 });
 

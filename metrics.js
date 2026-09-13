@@ -42,17 +42,17 @@ const { Pool } = require('pg');
 // file storage above/below stays the default for exactly the reason
 // its own original comment gives: self-hosted/lightweight, zero new
 // infrastructure required to run this router standalone in some other
-// app. But the EMBEDDED deployment inside MemoCode specifically already
-// has a real Postgres database (memocode-db, provisioned for its own
-// user-account/library data regardless of this router) - reusing that
-// costs nothing new (no extra service, no extra bill, no extra account)
-// and, unlike the router's own container filesystem, genuinely survives
-// a restart/redeploy. DATABASE_URL is Render's own standard convention
-// for injecting a database's connection string (matches how
-// 000_backend/db.mjs reads the exact same variable for the exact same
-// reason) - set it and every function below transparently reads/writes
-// Postgres instead of local files; leave it unset and nothing here
-// changes at all.
+// app. But an embedded deployment (this engine running inside another
+// app's own backend) often already has a real Postgres database,
+// provisioned for its own user-account/library data regardless of this
+// router - reusing that costs nothing new (no extra service, no extra
+// bill, no extra account) and, unlike the router's own container
+// filesystem, genuinely survives a restart/redeploy. DATABASE_URL is
+// Render's own standard convention for injecting a database's
+// connection string (matches how a sibling backend's own db.mjs reads
+// the exact same variable for the exact same reason) - set it and every
+// function below transparently reads/writes Postgres instead of local
+// files; leave it unset and nothing here changes at all.
 function usingPostgres() {
   return Boolean(process.env.DATABASE_URL || process.env.MEMOCODE_ROUTER_DATABASE_URL);
 }
@@ -79,10 +79,11 @@ function getPool() {
 // NULLABLE, not NOT NULL - deliberately different from how a fork
 // starting fresh (CREATE TABLE with a required column) would do it.
 // This module has live deployments already running against an existing
-// table (MemoCode's own render wiring) where CREATE TABLE IF NOT EXISTS
-// is a no-op on an already-created table - ADD COLUMN IF NOT EXISTS is
-// what actually reaches an existing table's schema (same ALTER pattern
-// the sibling backend's db.mjs already uses for exactly this reason).
+// table (a real embedded deployment's own Render wiring) where CREATE
+// TABLE IF NOT EXISTS is a no-op on an already-created table - ADD
+// COLUMN IF NOT EXISTS is what actually reaches an existing table's
+// schema (same ALTER pattern a sibling backend's own db.mjs already
+// uses for exactly this reason).
 // Existing rows get scope = NULL, which is exactly right: they were
 // recorded before scope existed, under the one global/unscoped history,
 // and null-scope reads (see rowFilterSql below) return precisely that
@@ -496,8 +497,8 @@ async function providerStats(scope, windowSize = 50) {
  * duplicated logic.
  */
 
-// Shared "$ saved" formula (mirrors cachegate-cloud's usage.mjs
-// estimatedSavings / estimatedSavingsGlobal, 2026-09-05 Phase 2 step 20):
+// Shared "$ saved" formula (mirrors a wrapping deployment's own usage.mjs
+// estimatedSavings / estimatedSavingsGlobal):
 // for each model, the average cost of a cache-MISS (cache_hit === false,
 // no error) times that model's cache-HIT count, summed across models. A
 // model with hits but no recorded miss yet contributes 0 - never a

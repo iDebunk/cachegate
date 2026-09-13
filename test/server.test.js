@@ -500,9 +500,9 @@ test('POST /v1/chat/completions with a virtual model tries every candidate via f
   assert.ok(res.body.error);
 });
 
-// Regression test for the seams gap PR #77 fixed: resolveProviderKey
+// Regression test for a real seams gap: resolveProviderKey
 // must be awaitable, not just callable - a real per-scope key lookup
-// (Cachegate Cloud's own BYOK: a Postgres fetch + decrypt) is a
+// (a real BYOK deployment's: a Postgres fetch + decrypt) is a
 // Promise, not a plain value. This drives an ACTUAL async resolver
 // (a real Promise, deliberately not resolved on the same tick - see
 // the setImmediate below) through a real HTTP POST to /v1, all the way

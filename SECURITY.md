@@ -17,10 +17,6 @@ This opens a private conversation with the maintainers, visible only to
 you and them, and lets a fix be prepared and released before the
 vulnerability is public.
 
-*(Maintainer note, remove once live: this requires "Private vulnerability
-reporting" to be turned on for the repository — Settings → Security →
-Private vulnerability reporting — as part of step 15's repo setup.)*
-
 ## What counts as a security issue here
 
 Concretely, for this project: anything that lets a request bypass
@@ -33,7 +29,8 @@ those (see `CONTRIBUTING.md`).
 
 ## Supported versions
 
-This project is pre-1.0 (see `OPEN_SOURCE_ROADMAP.md` on the version
-plan) — security fixes go into the latest release only. Once a stable
-1.0 line exists, this section will name which major versions still
-receive fixes.
+This is a small, single-maintainer-line project (currently 1.4.x) with
+no parallel major-version branches to backport across — security fixes
+go into the latest published release only. If that ever changes (a
+maintained older major line, say), this section will name which
+versions still receive fixes.
