@@ -19,6 +19,9 @@
 // never match again and age out via MAX_CANDIDATES_PER_MODEL's cap / TTL.
 // Not a crash, but the cache warms up from zero again.
 
+const os = require('os');
+const path = require('path');
+
 const { OpenAI } = require('openai');
 
 const LOCAL_EMBEDDING_DIMENSIONS = 384; // all-MiniLM-L6-v2
@@ -35,13 +38,35 @@ function getClient() {
 // on. @huggingface/transformers (v3, same pipeline() API) rather than the
 // frozen @xenova/transformers: the older package pins a vulnerable
 // protobufjs transitively (CVSS 9.8) that ships to every installer.
-let localPipeline;
-async function getLocalPipeline() {
-  if (!localPipeline) {
-    const { pipeline } = await import('@huggingface/transformers');
-    localPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+// Store the PROMISE, not the resolved pipeline: embed() runs two lookups
+// concurrently (pair.a + pair.b), and storing the resolved value leaves a
+// window where the second call also starts a full model load (double
+// download + double session init). Sharing the promise makes the first
+// use a single load.
+let localPipelinePromise;
+function getLocalPipeline() {
+  if (!localPipelinePromise) {
+    localPipelinePromise = (async () => {
+      const { pipeline, env } = await import('@huggingface/transformers');
+      // Cache the model OUTSIDE node_modules (npm ci wipes it). A stable,
+      // non-synced cache dir also avoids OneDrive "Files On-Demand"
+      // reparse points, which ONNX Runtime cannot open.
+      env.cacheDir = process.env.TRANSFORMERS_CACHE_DIR
+        || path.join(os.homedir(), '.cache', 'huggingface');
+      // Windows workaround: onnxruntime-node's native file open (mmap) can
+      // fail with "Load model ... failed: system error number 13"
+      // (ERROR_ACCESS_DENIED) on freshly-downloaded .onnx files. Loading
+      // from a Uint8Array buffer instead of a file path skips the native
+      // open entirely. Tradeoff: no disk cache, so the model re-downloads
+      // on each process start. Windows-only; Linux/macOS keep the fast
+      // disk-cached path.
+      if (process.platform === 'win32') {
+        env.useFSCache = false;
+      }
+      return pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+    })();
   }
-  return localPipeline;
+  return localPipelinePromise;
 }
 
 function useLocal() {

@@ -343,3 +343,30 @@ test('an entry with NO recorded shape is refused to a caller that demands a shap
   assert.ok(asProse, 'but a shape-neutral caller still gets it, so the gate is not a cache flush');
   assert.equal(asProse.entry.content, 'old answer');
 });
+
+// --- slot-value guard (22.3 follow-up) ---------------------------------------
+// MiniLM (the local backend) scores "What happened on 2024-01-15?" vs
+// "2024-03-22?" at cosine ~0.95 - a wrong answer. The guard refuses a hit
+// across a literal date/number difference. A constant-vector embedder makes
+// cosine 1.0 for ANY two texts, so the ONLY thing that can reject here is the
+// slot guard itself - this isolates the guard from the similarity math.
+const constantEmbeddings = {
+  isEnabled: () => true,
+  embed: () => Promise.resolve(new Array(32).fill(1))
+};
+
+test('a same-template/different-date prompt is NOT served, even at cosine 1.0', async () => {
+  const model = 'router-test-model-slotguard';
+  const storePayload = { model, messages: [{ role: 'user', content: 'what happened on 2024-01-15' }] };
+  await semanticCache.store(null, storePayload,
+    { provider: 'openai', model, content: 'answer for jan 15' }, { embeddings: constantEmbeddings });
+
+  const differentDate = { model, messages: [{ role: 'user', content: 'what happened on 2024-03-22' }] };
+  const match = await semanticCache.findMatch(null, differentDate, { embeddings: constantEmbeddings });
+  assert.equal(match, null, 'a different date must be refused even though the vectors are identical');
+
+  const sameDate = { model, messages: [{ role: 'user', content: 'what happened on 2024-01-15' }] };
+  const hit = await semanticCache.findMatch(null, sameDate, { embeddings: constantEmbeddings });
+  assert.ok(hit, 'the same date must still hit');
+  assert.equal(hit.entry.content, 'answer for jan 15');
+});

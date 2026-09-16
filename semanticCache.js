@@ -55,7 +55,7 @@ const embeddingsDefault = require('./embeddings');
 // The answer-shape definition is shared with the exact cache ON PURPOSE: the two paths diverged once -
 // cache.js keyed response_format and this file never did - and a field added to one of them silently
 // stops being enforced by the other. No cycle: cache.js does not require this file.
-const { shapeFields } = require('./cache');
+const { shapeFields, extractSlots } = require('./cache');
 const lsh = require('./lsh');
 
 // The shape of a request that demands nothing about the answer's form: no response_format, no tools,
@@ -163,10 +163,14 @@ async function findMatch(scope, payload, { threshold = DEFAULT_THRESHOLD, embedd
   // answer's shape: a json_object caller served a cached plain-text answer fails to parse it, which
   // surfaces as an upstream outage rather than a cache miss. Same reasoning that excludes tool calls.
   const shape = JSON.stringify(shapeFields(payload));
+  const queryText = extractPromptText(payload);
+  // Slot-value guard (22.3 follow-up): the query's own literal date/number
+  // multiset, compared against each candidate's stored `slots` below.
+  const querySlots = JSON.stringify(extractSlots(queryText));
 
   let queryEmbedding;
   try {
-    queryEmbedding = await embeddings.embed(extractPromptText(payload));
+    queryEmbedding = await embeddings.embed(queryText);
   } catch (err) {
     console.warn('⚠️ Semantic cache lookup failed to embed, skipping:', err.message);
     return null;
@@ -189,6 +193,7 @@ async function findMatch(scope, payload, { threshold = DEFAULT_THRESHOLD, embedd
   let best = null;
   let shapeSkipped = 0;
   let lshSkipped = 0;
+  let slotsSkipped = 0;
   for (const line of raw) {
     let record;
     try {
@@ -213,6 +218,16 @@ async function findMatch(scope, payload, { threshold = DEFAULT_THRESHOLD, embedd
       shapeSkipped += 1;
       continue;
     }
+    // Slot-value guard (22.3 follow-up): a cosine hit across a literal
+    // date/number difference is a wrong answer (MiniLM cannot see
+    // "2024-01-15" vs "2024-03-22"), so refuse it before spending
+    // decode/cosine work. Only applies when the entry recorded its
+    // slots; legacy entries (no `slots`) are scored as before - the
+    // upgrade is not a cache flush.
+    if (record.slots !== undefined && record.slots !== querySlots) {
+      slotsSkipped += 1;
+      continue;
+    }
     const candSig = record.sig ? Buffer.from(record.sig, 'base64') : null;
     if (candSig && queryBands && !lsh.sharesBand(queryBands, lsh.bandKeys(candSig))) {
       lshSkipped += 1;
@@ -235,6 +250,11 @@ async function findMatch(scope, payload, { threshold = DEFAULT_THRESHOLD, embedd
     // Visible for the same reason: a mis-tuned LSH (too few bands) looks like the cache just
     // stopped matching, when it is actually the pre-filter dropping candidates too eagerly.
     console.log(`[semantic] ${lshSkipped} candidate(s) skipped by the LSH pre-filter`);
+  }
+  if (slotsSkipped > 0) {
+    // Visible for the same reason as the shape gate: a guard doing its job looks like a
+    // cache that stopped matching, when it is actually refusing a wrong answer.
+    console.log(`[semantic] ${slotsSkipped} candidate(s) skipped: literal date/number differs from this request`);
   }
   return best;
 }
@@ -262,6 +282,9 @@ async function store(scope, payload, entry, { ttlSeconds = DEFAULT_TTL_SECONDS, 
       // entries, which findMatch then always scores (no pre-filter) until they age out.
       sig: (lsh.signatureOf(embedding) || Buffer.alloc(0)).toString('base64'),
       shape,
+      // Slot-value guard (22.3 follow-up): the literal date/number multiset, so findMatch
+      // can refuse a cosine hit across a literal difference. Absent on legacy entries.
+      slots: JSON.stringify(extractSlots(extractPromptText(payload))),
       entry,
       storedAt: Date.now()
     }));
