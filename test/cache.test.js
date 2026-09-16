@@ -233,3 +233,37 @@ test('the number/date gate still changes the KEY, and only when enabled', () => 
     else process.env.CACHE_KEY_SLOT_NUMBERS = saved;
   }
 });
+
+// ── slot guard (22.3 follow-up) ──────────────────────────────────────────────
+// extractSlots() is the literal date/number multiset the semantic cache compares before trusting a
+// cosine hit. It must extract the SUBSTANCE slots (date/number) and ignore the incidental ones
+// (email/URL), so the guard refuses a wrong answer without lowering the hit rate over identifiers.
+test('extractSlots() returns the date/number values, sorted and lowercased', () => {
+  assert.deepEqual(
+    cacheMod.extractSlots('What happened on 2024-01-15? Answer in 3 parts.'),
+    ['01', '15', '2024', '2024-01-15', '3']
+  );
+});
+
+test('extractSlots() ignores email/URL - incidental, not substance', () => {
+  assert.deepEqual(
+    cacheMod.extractSlots('Email BOB@Example.com or see https://example.com/x about 15% of 200'),
+    ['15', '200']
+  );
+});
+
+test('extractSlots() is empty for prose with no date/number', () => {
+  assert.deepEqual(cacheMod.extractSlots('summarize this document for me'), []);
+});
+
+test('extractSlots() differs across a date change - the reject signal behind the guard', () => {
+  assert.notDeepEqual(
+    cacheMod.extractSlots('What happened on 2024-01-15?'),
+    cacheMod.extractSlots('What happened on 2024-03-22?')
+  );
+  assert.deepEqual(
+    cacheMod.extractSlots('What happened on 2024-01-15?'),
+    cacheMod.extractSlots('What happened on 2024-01-15?'),
+    'the same date must produce the same multiset'
+  );
+});

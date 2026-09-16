@@ -99,6 +99,39 @@ function normalizeText(text) {
   return out;
 }
 
+// The semantic cache's slot guard (step 22.3 follow-up): extract the
+// date/number slot VALUES (not collapsed to <var>) so semanticCache.js
+// can refuse a cosine hit across a literal difference. Only date +
+// number are extracted - those are the two categories step 21.2 already
+// identified as "often THE substance of the answer". Email/URL are
+// deliberately excluded: they are incidental identifiers (step 21.2's own
+// rationale for slotting them unconditionally), so gating a semantic
+// match on them would only lower the hit rate, not the false-positive
+// rate.
+//
+// NOT gated behind CACHE_KEY_SLOT_NUMBERS: that gate governs whether
+// numbers/dates are FOLDED into the exact-cache key (the dangerous
+// direction - two prompts sharing a key). This guard REJECTS on a
+// difference (the safe direction - a miss, never a wrong answer), so it
+// is always on for date/number.
+//
+// Returns the values as a sorted array of lowercased strings - an
+// order-insensitive multiset - so two prompts compare by
+// JSON.stringify equality. The same date in two formats ("2024-01-15"
+// vs "01/15/2024") is treated as different, which is a miss, not a
+// wrong answer - acceptable for a guard whose only failure mode is a
+// cache miss.
+function extractSlots(text) {
+  const folded = foldText(text);
+  const values = [];
+  for (const slotter of SLOTTERS) {
+    if (!slotter.gated) continue; // email/URL are incidental, not substance
+    const found = folded.match(slotter.re);
+    if (found) values.push(...found);
+  }
+  return values.map((v) => v.toLowerCase()).sort();
+}
+
 // Which slotting steps WOULD fire for this request, for the R4 measurement.
 //
 // Reports gated steps even when the gate is off, on purpose: that is the only way to price turning
@@ -169,6 +202,7 @@ module.exports = {
   slottingFlags,
   normalizeMessages,
   normalizeText,
+  extractSlots,
 
   isConnected() {
     return redis.isConnected();
