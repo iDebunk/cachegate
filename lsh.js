@@ -94,11 +94,14 @@ function bandKeys(sig) {
   return Array.from(sig);
 }
 
-// Do two signatures share any band? Set lookup so it is O(B), not O(B^2).
+// Do two signatures share any band? In LSH a band is a specific chunk of the
+// signature, so band i must match band i (same position) - comparing every band
+// of one against every band of the other is 8x too permissive and inflates the
+// fan-out. This is position-matched, O(B).
 function sharesBand(a, b) {
   if (!a || !b) return false;
-  const set = new Set(a);
-  for (const k of b) if (set.has(k)) return true;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) if (a[i] === b[i]) return true;
   return false;
 }
 
