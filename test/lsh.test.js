@@ -102,8 +102,9 @@ test('opposite vectors flip every signature bit (the signature is a pure sign pr
 
 test('unrelated vectors are dropped the vast majority of the time', () => {
   // Two independently-drawn unit vectors are near-orthogonal, so their signatures
-  // agree per-bit ~50% and share a full 8-bit band only ~3% of the time. Assert the
-  // pre-filter skips well over half - a loose, non-flaky bound on real precision.
+  // agree per-bit ~50% and share a full 8-bit band (same position) only ~3% of the
+  // time. Assert under 10% - tight enough to catch the cross-position band-match bug
+  // (which measured ~23-25% fan-out and was found by bench/lsh-benchmark.js).
   let shared = 0;
   const trials = 200;
   for (let i = 0; i < trials; i++) {
@@ -111,5 +112,5 @@ test('unrelated vectors are dropped the vast majority of the time', () => {
     const b = randomUnitVec(96, 2000 + i);
     if (lsh.sharesBand(lsh.bandKeys(lsh.signatureOf(a)), lsh.bandKeys(lsh.signatureOf(b)))) shared++;
   }
-  assert.ok(shared < trials * 0.3, `pre-filter should skip the majority of unrelated pairs (shared ${shared}/${trials})`);
+  assert.ok(shared < trials * 0.1, `pre-filter should skip >90% of unrelated pairs (shared ${shared}/${trials})`);
 });
