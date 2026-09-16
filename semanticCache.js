@@ -15,10 +15,17 @@
 // module assumed - most self-hosted Redis instances (including
 // Render's managed Redis) don't have that module. A lookup pulls up to
 // MAX_CANDIDATES_PER_MODEL recent entries for that model and computes
-// cosine similarity IN NODE, not in Redis. This is brute-force, not
-// indexed - fine at the volume a self-hosted single instance sees, not
-// meant to scale past that cap. A real vector index is the honest next
-// step if traffic outgrows it.
+// cosine similarity IN NODE, not in Redis. Step 23 adds a MinHash/LSH
+// (random-hyperplane SimHash, banded) pre-filter AHEAD of that scan - see
+// lsh.js - so a candidate whose bands share nothing with the query is
+// skipped before its embedding is decoded or scored. The exact cosine
+// scan is still the final judge; the pre-filter only narrows the field.
+//
+// HNSW (step 23.2) is deliberately DEFERRED, gated on a traffic trigger,
+// not a date: adopt a real vector index when MAX_CANDIDATES_PER_MODEL is
+// raised past ~5000 per model, OR a lookup's LSH fan-out (candidates that
+// share a band) averages above ~10% of the list - i.e. when the pre-filter
+// stops narrowing. Neither threshold is reachable at single-instance volume.
 //
 // What that brute force actually COSTS was worth measuring rather than
 // assuming, and it was not the arithmetic: each entry used to carry its
@@ -49,6 +56,7 @@ const embeddingsDefault = require('./embeddings');
 // cache.js keyed response_format and this file never did - and a field added to one of them silently
 // stops being enforced by the other. No cycle: cache.js does not require this file.
 const { shapeFields } = require('./cache');
+const lsh = require('./lsh');
 
 // The shape of a request that demands nothing about the answer's form: no response_format, no tools,
 // no tool_choice, no seed. The semantic shape gate uses it to decide whether an entry carrying no
@@ -173,8 +181,14 @@ async function findMatch(scope, payload, { threshold = DEFAULT_THRESHOLD, embedd
   }
 
   const queryNorm = normOf(queryEmbedding);
+  // LSH pre-filter (step 23): narrow the candidate field by band intersection before the
+  // expensive decode + cosine. Entries written before the signature existed have no `sig`
+  // and are always scored (legacy branch, same as the legacy embedding format).
+  const querySig = lsh.signatureOf(queryEmbedding);
+  const queryBands = lsh.bandKeys(querySig);
   let best = null;
   let shapeSkipped = 0;
+  let lshSkipped = 0;
   for (const line of raw) {
     let record;
     try {
@@ -199,6 +213,11 @@ async function findMatch(scope, payload, { threshold = DEFAULT_THRESHOLD, embedd
       shapeSkipped += 1;
       continue;
     }
+    const candSig = record.sig ? Buffer.from(record.sig, 'base64') : null;
+    if (candSig && queryBands && !lsh.sharesBand(queryBands, lsh.bandKeys(candSig))) {
+      lshSkipped += 1;
+      continue;
+    }
     const vector = decodeEmbedding(record);
     if (!vector) continue; // ditto an entry whose vector cannot be read
     const candidateNorm = typeof record.norm === 'number' ? record.norm : normOf(vector);
@@ -211,6 +230,11 @@ async function findMatch(scope, payload, { threshold = DEFAULT_THRESHOLD, embedd
     // Visible, because "the semantic cache stopped hitting" otherwise looks like a tuning problem
     // rather than the shape gate doing its job.
     console.log(`[semantic] ${shapeSkipped} candidate(s) skipped: answer shape differs from this request`);
+  }
+  if (lshSkipped > 0) {
+    // Visible for the same reason: a mis-tuned LSH (too few bands) looks like the cache just
+    // stopped matching, when it is actually the pre-filter dropping candidates too eagerly.
+    console.log(`[semantic] ${lshSkipped} candidate(s) skipped by the LSH pre-filter`);
   }
   return best;
 }
@@ -234,6 +258,9 @@ async function store(scope, payload, entry, { ttlSeconds = DEFAULT_TTL_SECONDS, 
     await redis.client.lPush(key, JSON.stringify({
       embedding: encodeEmbedding(embedding),
       norm: normOf(embedding),
+      // LSH pre-filter signature (step 23). base64 of the K-bit SimHash; absent on legacy
+      // entries, which findMatch then always scores (no pre-filter) until they age out.
+      sig: (lsh.signatureOf(embedding) || Buffer.alloc(0)).toString('base64'),
       shape,
       entry,
       storedAt: Date.now()
